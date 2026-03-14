@@ -159,7 +159,7 @@ def load_fw_generators(layer_idx: int, architecture: str = "mlp",
         base = Path("artifacts") / f"layer_{layer_idx}"
 
     generators = []
-    for i in range(1, 10):  # up to 9 FW iterations
+    for i in range(10):  # up to 10 FW iterations (fw_0, fw_1, ...)
         path = base / f"generator_fw_{i}.pt"
         if not path.exists():
             break

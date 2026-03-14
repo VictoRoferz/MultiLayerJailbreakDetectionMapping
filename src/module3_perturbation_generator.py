@@ -253,6 +253,8 @@ class CVAEPerturbationGenerator(nn.Module):
         """Generate delta_f from noise z + conditioning f_L.
         Same interface as PerturbationGenerator.forward().
         Normalizes/denormalizes internally."""
+        assert z.shape[-1] >= self.z_dim, \
+            f"z has {z.shape[-1]} dims but z_dim={self.z_dim}"
         f_L_norm = self.normalize(f_L)
         delta_norm = self.decoder(torch.cat([z[:, :self.z_dim], f_L_norm], dim=-1))
         return self.denormalize(delta_norm)

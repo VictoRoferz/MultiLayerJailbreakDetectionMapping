@@ -61,28 +61,44 @@ class SubspaceDetector:
     """
     Prompt-agnostic jailbreak detector based on activation subspace membership.
 
-    Detection: d(x) = min_k cosdist(PCA(f_L(x)), mu_k)
-    Flag as jailbreak if d(x) < theta.
+    The detector works in the perturbation (delta_f) space:
+    1. Compute the "perturbation" of the input relative to the benign centroid:
+       delta = f_L(x) - benign_centroid
+    2. Project delta into PCA space (fit on successful delta_f from Module 6)
+    3. Score: d(x) = min_k cosdist(PCA(delta), mu_k)
+    4. Flag as jailbreak if d(x) < theta
+
+    This aligns train (Module 6 clusters delta_f) with inference (we compute
+    an analogous delta from the input activation).
     """
 
     def __init__(self, pca_components: np.ndarray, pca_mean: np.ndarray,
-                 cluster_centers: np.ndarray, threshold: float = 0.5):
+                 cluster_centers: np.ndarray, threshold: float = 0.5,
+                 benign_centroid: np.ndarray = None):
         self.pca_components = pca_components  # [n_pca, D]
         self.pca_mean = pca_mean              # [D]
         self.centers = cluster_centers         # [K*, n_pca]
         self.threshold = threshold
+        self.benign_centroid = benign_centroid  # [D] — mean of benign activations
 
-    def pca_transform(self, activations: np.ndarray) -> np.ndarray:
-        """Project activations into PCA space."""
-        centered = activations - self.pca_mean
+    def pca_transform(self, data: np.ndarray) -> np.ndarray:
+        """Project data into PCA space."""
+        centered = data - self.pca_mean
         return centered @ self.pca_components.T
+
+    def _to_delta_space(self, activations: np.ndarray) -> np.ndarray:
+        """Convert raw activations to delta space (relative to benign centroid)."""
+        if self.benign_centroid is not None:
+            return activations - self.benign_centroid
+        return activations
 
     def score(self, activations: np.ndarray) -> np.ndarray:
         """
         Compute detection scores (lower = more jailbreak-like).
         Returns array of min cosine distances to cluster centers.
         """
-        projected = self.pca_transform(activations)
+        deltas = self._to_delta_space(activations)
+        projected = self.pca_transform(deltas)
         cos_dist = cosine_distances(projected, self.centers)  # [N, K*]
         return cos_dist.min(axis=1)  # [N]
 
@@ -99,11 +115,18 @@ class SubspaceDetector:
         pca_data = torch.load(base / "pca_model.pt", weights_only=False)
         cluster_data = torch.load(base / "cluster_centers.pt", weights_only=False)
 
+        # Load benign centroid if available
+        benign_centroid = None
+        centroid_path = base / "benign_centroid.pt"
+        if centroid_path.exists():
+            benign_centroid = torch.load(centroid_path, weights_only=False).numpy()
+
         return cls(
             pca_components=pca_data["pca_components"].numpy(),
             pca_mean=pca_data["pca_mean"].numpy(),
             cluster_centers=cluster_data["centers"].numpy(),
             threshold=threshold,
+            benign_centroid=benign_centroid,
         )
 
 
@@ -310,6 +333,17 @@ def run_detector(
     print(f"  Test benign:        {len(eval_data['test_benign'])}")
     print(f"  Harmful:            {len(eval_data['harmful'])}")
 
+    # Compute and save benign centroid for delta-space detection
+    all_benign = np.concatenate([eval_data["calibration_benign"], eval_data["test_benign"]])
+    benign_centroid = all_benign.mean(axis=0)
+    detector.benign_centroid = benign_centroid
+
+    out_dir = Path("artifacts") / f"layer_{layer_idx}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(torch.tensor(benign_centroid, dtype=torch.float32),
+               out_dir / "benign_centroid.pt")
+    print(f"  Computed benign centroid from {len(all_benign)} samples")
+
     # Tune threshold
     theta = tune_threshold(detector, eval_data["calibration_benign"], fpr_target)
     detector.threshold = theta
@@ -385,6 +419,7 @@ def run_detector(
         "pca_components": torch.tensor(detector.pca_components, dtype=torch.float32),
         "pca_mean": torch.tensor(detector.pca_mean, dtype=torch.float32),
         "cluster_centers": torch.tensor(detector.centers, dtype=torch.float32),
+        "benign_centroid": torch.tensor(benign_centroid, dtype=torch.float32),
         "threshold": theta,
         "layer": layer_idx,
     }, out_dir / "detector_config.pt")

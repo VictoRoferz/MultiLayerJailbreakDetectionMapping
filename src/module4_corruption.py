@@ -83,21 +83,33 @@ def generate_with_hook(model, tokenizer, inputs, layer_idx: int,
     Run model.generate() with delta_f injected at layer L via hook.
     Returns generated text string.
     """
-    def make_hook(delta, k_positions):
+    def make_hook(delta, k_positions, prompt_len):
+        fired = [False]
         def hook_fn(module, args, output):
+            # Only fire on the first forward pass (prompt encoding).
+            # During autoregressive generation, subsequent passes process
+            # single new tokens — applying delta there would corrupt them.
+            if fired[0]:
+                return output
+            fired[0] = True
+
             if isinstance(output, tuple):
                 hidden = output[0]
             else:
                 hidden = output
-            hidden[:, -k_positions:, :] = (
-                hidden[:, -k_positions:, :]
+
+            # Apply delta to the last k positions of the prompt
+            start = max(prompt_len - k_positions, 0)
+            hidden[:, start:prompt_len, :] = (
+                hidden[:, start:prompt_len, :]
                 + delta.view(1, 1, -1).to(hidden.dtype)
             )
             return (hidden,) + output[1:] if isinstance(output, tuple) else hidden
         return hook_fn
 
+    prompt_len = inputs["input_ids"].shape[1]
     layer_module = get_target_module(model, layer_idx)
-    hook_handle = layer_module.register_forward_hook(make_hook(delta_f, k))
+    hook_handle = layer_module.register_forward_hook(make_hook(delta_f, k, prompt_len))
 
     try:
         with torch.no_grad():
@@ -214,7 +226,7 @@ def load_test_passages(max_passages: int = None) -> list:
     passages = []
     for item in ds:
         text = (item.get("text") or "").strip()
-        if 50 < len(text) < 2000:  # reasonable length
+        if 200 < len(text) < 4000:  # char-length proxy for ~64-256 tokens
             passages.append(text)
         if max_passages and len(passages) >= max_passages:
             break
@@ -242,6 +254,7 @@ def run_corruption_loop(
     denoiser_steps: int = 20,
     denoiser_t_start: float = 0.3,
     save_outputs: bool = True,
+    seed: int = 42,
 ) -> dict:
     """
     Algorithm 1 from the paper: Corruption Loop.
@@ -257,9 +270,15 @@ def run_corruption_loop(
     Returns dict with corruption results.
     """
     device = get_device()
+
+    # Set seed for reproducibility
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     print(f"\n{'='*60}")
     print(f"  Module 4: Corruption Loop — Layer {layer_idx} ({architecture})")
-    print(f"  K={K} perturbations/passage, epsilon={epsilon}")
+    print(f"  K={K} perturbations/passage, epsilon={epsilon}, seed={seed}")
     print(f"{'='*60}")
 
     # Load model
@@ -281,12 +300,14 @@ def run_corruption_loop(
     generators, ckpt = load_all_generators(layer_idx, architecture, device)
     print(f"  Loaded {len(generators)} generator(s): {architecture} (z_dim={generators[0].z_dim})")
 
-    # Use epsilon from checkpoint if available (ensures training/corruption consistency)
-    if epsilon is None or "epsilon" in ckpt:
+    # Use epsilon from checkpoint only when user didn't explicitly set one
+    if epsilon is None:
         ckpt_eps = ckpt.get("epsilon")
-        if ckpt_eps is not None and ckpt_eps != epsilon:
-            print(f"  [NOTE] Using epsilon={ckpt_eps} from checkpoint (CLI had {epsilon})")
+        if ckpt_eps is not None:
+            print(f"  [NOTE] Using epsilon={ckpt_eps} from checkpoint")
             epsilon = ckpt_eps
+        else:
+            epsilon = 0.1  # default fallback
 
     # Load optional denoiser
     denoiser = load_denoiser(layer_idx, architecture, device)

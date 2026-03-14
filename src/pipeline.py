@@ -38,14 +38,16 @@ from pathlib import Path
 from module3_perturbation_generator import DEFAULT_LAYERS
 
 # Module imports (lazy — only imported when needed)
-MODULE_NAMES = ["pca", "corruption", "judge", "clustering", "detector"]
+MODULE_NAMES = ["pca", "generator", "corruption", "judge", "clustering", "detector"]
 
 
 def check_artifacts(layer_idx: int, module: str) -> bool:
     """Check if a module's output artifacts already exist."""
     base = Path("artifacts") / f"layer_{layer_idx}"
+    arch_dir = base / "cvae"  # default architecture subdir
     checks = {
         "pca": base / "pca_results.json",
+        "generator": arch_dir / "generator.pt",
         "corruption": base / "corruption_results.pt",
         "judge": base / "judged_results.pt",
         "clustering": base / "cluster_centers.pt",
@@ -109,6 +111,28 @@ def run_pipeline(
                 save_results(results, layer_idx, "perturbation_results.json")
             except FileNotFoundError as e:
                 print(f"  [SKIP] Perturbation analysis: {e}")
+
+    # ── Module 3: Generator Training ─────────────────────────────────────
+    if "generator" in modules:
+        if not force and check_artifacts(layer_idx, "generator"):
+            print(f"\n  [SKIP] Generator — artifacts exist")
+        else:
+            from module3_perturbation_generator import main as gen_main
+            print(f"\n  Running generator training (all phases)...")
+            import types
+            gen_args = types.SimpleNamespace(
+                layer_idx=layer_idx,
+                architecture=architecture,
+                phase="all",
+                epsilon=epsilon,
+                z_dim=64 if architecture == "cvae" else 64,
+                n_rl_steps=5000,
+                n_fw_iterations=3,
+            )
+            try:
+                gen_main(gen_args)
+            except (FileNotFoundError, ValueError) as e:
+                print(f"  [ERROR] Generator training failed: {e}")
 
     # ── Module 4: Corruption ──────────────────────────────────────────────
     if "corruption" in modules:

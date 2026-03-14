@@ -407,16 +407,15 @@ def run_clustering(
     delta_f = perturbation_data["delta_f"]
     f_L = perturbation_data["f_L"]
 
-    if f_L is not None and len(f_L) == len(delta_f):
-        # Compute corrupted activations: f_corrupted = f_L + delta_f
-        # This ensures PCA/clusters are in activation space (same as Module 7 input)
-        cluster_input = (f_L + delta_f).numpy()
-        print(f"  Loaded {len(delta_f)} successful perturbations")
-        print(f"  Clustering corrupted activations (f_L + delta_f) in activation space")
-    else:
-        # Fallback: cluster raw delta_f (legacy behavior)
-        cluster_input = delta_f.numpy()
-        print(f"  [WARN] No f_L available, clustering raw delta_f (legacy mode)")
+    # NOTE: We cluster raw delta_f vectors (perturbation directions) rather than
+    # corrupted activations (f_L + delta_f). This is because the detector at
+    # inference time compares clean activations against these clusters. Clustering
+    # delta_f captures the *directions* of jailbreak perturbations, which is what
+    # the detector needs to recognize. Using corrupted activations would create a
+    # mismatch between the PCA space (fit on corrupted) and inference inputs (clean).
+    cluster_input = delta_f.numpy()
+    print(f"  Loaded {len(delta_f)} successful perturbations")
+    print(f"  Clustering raw delta_f vectors (perturbation directions)")
 
     print(f"  Dimensionality: {cluster_input.shape[1]}")
 
@@ -453,7 +452,8 @@ def run_clustering(
     best_sil = float(silhouette_score(pca_data, km_labels)) if k_star > 1 else 0.0
 
     # ── Baseline: Random clustering ──────────────────────────────────────
-    random_labels = np.random.randint(0, k_star, size=len(pca_data))
+    rng = np.random.RandomState(42)
+    random_labels = rng.randint(0, k_star, size=len(pca_data))
     random_sil = float(silhouette_score(pca_data, random_labels)) if k_star > 1 else 0.0
     print(f"\n  Baseline (random K*={k_star} clustering): silhouette={random_sil:.4f}")
     print(f"  K-means advantage: {best_sil - random_sil:+.4f}")

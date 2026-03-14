@@ -209,17 +209,22 @@ def split_data(passages: list, ratios: tuple = (0.7, 0.1, 0.2),
 
 def extract_activations(model, tokenizer, passages: list[str],
                         layers: list[int], max_length: int,
-                        k: int = 5) -> dict:
+                        k: int = 5) -> tuple:
     """
     Run the frozen LLM on each passage and extract the mean of the last
     k token positions at each requested layer.
 
     Returns:
+        (storage, successful_indices) where:
         storage - { layer_idx: { 'acts': list[Tensor] } }
+        successful_indices - list[int] of passage indices successfully extracted
     """
-    storage = {l: {"acts": []} for l in layers}
+    assert hasattr(model, 'config'), "Model must have a config attribute"
 
-    for text in tqdm.tqdm(passages, desc="Extracting activations"):
+    storage = {l: {"acts": []} for l in layers}
+    successful_indices = []
+
+    for idx, text in enumerate(tqdm.tqdm(passages, desc="Extracting activations")):
         inputs = tokenizer(
             text,
             return_tensors="pt",
@@ -231,19 +236,28 @@ def extract_activations(model, tokenizer, passages: list[str],
             outputs = model(**inputs)
 
         all_states = outputs.hidden_states
+        if all_states is None:
+            print(f"[!] No hidden states for passage {idx}. Skipping.")
+            continue
 
+        success = True
         for layer_idx in layers:
             if layer_idx >= len(all_states):
                 print(f"[!] Layer {layer_idx} out of bounds "
-                      f"(max {len(all_states) - 1}). Skipping.")
-                continue
+                      f"(max {len(all_states) - 1}). Skipping passage {idx}.")
+                success = False
+                break
 
             seq_len = all_states[layer_idx].shape[1]
             actual_k = min(k, seq_len)
             act = all_states[layer_idx][0, -actual_k:, :].mean(dim=0)
 
             storage[layer_idx]["acts"].append(act.cpu().to(torch.float32))
-    return storage
+
+        if success:
+            successful_indices.append(idx)
+
+    return storage, successful_indices
 
 
 # ---------------------------------------------------------------------------
@@ -338,14 +352,20 @@ def main(args):
             continue
 
         print(f"\n[-] Extracting {split_name} split ({len(passages)} passages)...")
-        storage = extract_activations(
+        storage, successful_indices = extract_activations(
             model, tokenizer, passages,
             layers=args.layers,
             max_length=args.max_length,
         )
 
-        # Save per-split files
-        labels_tensor = torch.tensor(labels, dtype=torch.float32)
+        if len(successful_indices) < len(passages):
+            print(f"    [NOTE] {len(passages) - len(successful_indices)} passages "
+                  f"failed extraction, using {len(successful_indices)} successful ones")
+
+        # Build labels only for successfully extracted passages
+        labels_tensor = torch.tensor(
+            [labels[i] for i in successful_indices], dtype=torch.float32
+        )
 
         for layer_idx, data in storage.items():
             if not data["acts"]:

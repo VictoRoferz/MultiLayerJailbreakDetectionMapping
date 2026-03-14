@@ -114,7 +114,7 @@ def generate_with_hook(model, tokenizer, inputs, layer_idx: int,
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def load_generator(layer_idx: int, architecture: str, device: torch.device):
-    """Load trained generator from artifacts."""
+    """Load trained generator from artifacts. Returns (generator, checkpoint_dict)."""
     if architecture == "cvae":
         base = Path("artifacts") / f"layer_{layer_idx}" / "cvae"
     else:
@@ -134,7 +134,35 @@ def load_generator(layer_idx: int, architecture: str, device: torch.device):
     gen.load_state_dict(ckpt["model_state_dict"])
     gen.to(device)
     gen.eval()
-    return gen
+    return gen, ckpt
+
+
+def load_all_generators(layer_idx: int, architecture: str, device: torch.device):
+    """Load base generator + any Frank-Wolfe generators. Returns list of generators."""
+    gen, ckpt = load_generator(layer_idx, architecture, device)
+    generators = [gen]
+
+    if architecture == "cvae":
+        base = Path("artifacts") / f"layer_{layer_idx}" / "cvae"
+    else:
+        base = Path("artifacts") / f"layer_{layer_idx}"
+
+    # Load FW generators if they exist
+    for i in range(10):  # up to 10 FW generators
+        fw_path = base / f"generator_fw_{i}.pt"
+        if not fw_path.exists():
+            break
+        fw_ckpt = torch.load(fw_path, map_location=device, weights_only=False)
+        if architecture == "cvae":
+            fw_gen = CVAEPerturbationGenerator(fw_ckpt["activation_dim"], z_dim=fw_ckpt["z_dim"])
+        else:
+            fw_gen = PerturbationGenerator(fw_ckpt["activation_dim"], z_dim=fw_ckpt["z_dim"])
+        fw_gen.load_state_dict(fw_ckpt["model_state_dict"])
+        fw_gen.to(device)
+        fw_gen.eval()
+        generators.append(fw_gen)
+
+    return generators, ckpt
 
 
 def load_denoiser(layer_idx: int, architecture: str, device: torch.device):
@@ -249,9 +277,16 @@ def run_corruption_loop(
     )
     model.eval()
 
-    # Load generator
-    gen = load_generator(layer_idx, architecture, device)
-    print(f"  Generator loaded: {architecture} (z_dim={gen.z_dim})")
+    # Load generators (base + Frank-Wolfe ensemble)
+    generators, ckpt = load_all_generators(layer_idx, architecture, device)
+    print(f"  Loaded {len(generators)} generator(s): {architecture} (z_dim={generators[0].z_dim})")
+
+    # Use epsilon from checkpoint if available (ensures training/corruption consistency)
+    if epsilon is None or "epsilon" in ckpt:
+        ckpt_eps = ckpt.get("epsilon")
+        if ckpt_eps is not None and ckpt_eps != epsilon:
+            print(f"  [NOTE] Using epsilon={ckpt_eps} from checkpoint (CLI had {epsilon})")
+            epsilon = ckpt_eps
 
     # Load optional denoiser
     denoiser = load_denoiser(layer_idx, architecture, device)
@@ -264,6 +299,7 @@ def run_corruption_loop(
     # ── Main loop ─────────────────────────────────────────────────────────
     all_results = []
     total_generated = 0
+    n_gens = len(generators)
 
     for p_idx, text in enumerate(tqdm(passages, desc="Passages")):
         # Extract clean activation
@@ -282,6 +318,9 @@ def run_corruption_loop(
         k_positions = min(5, seq_len)
 
         for k_idx in range(K):
+            # Round-robin across generators for diversity
+            gen = generators[k_idx % n_gens]
+
             # Sample and generate perturbation
             z = torch.randn(1, gen.z_dim, device=device)
             with torch.no_grad():

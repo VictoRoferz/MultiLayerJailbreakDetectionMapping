@@ -1519,8 +1519,9 @@ def save_artifacts(
     reward_model: RewardModel,
     fw_generators: list,
     all_logs: dict,
-    architecture: str = "mlp",
+    architecture: str = "cvae",
     denoiser: nn.Module = None,
+    epsilon: float = 0.1,
 ):
     """Save all Module 3 artifacts."""
     if architecture == "cvae":
@@ -1535,6 +1536,7 @@ def save_artifacts(
         "activation_dim": generator.activation_dim,
         "z_dim": generator.z_dim,
         "architecture": architecture,
+        "epsilon": epsilon,
     }, base_dir / "generator.pt")
 
     # Save reward model (always in base layer dir so it's shared between architectures)
@@ -2424,7 +2426,8 @@ def main(args):
 
     # ── Save ───────────────────────────────────────────────────────────────
     save_artifacts(args.layer, generator, reward_model, fw_generators, all_logs,
-                   architecture=args.architecture, denoiser=denoiser)
+                   architecture=args.architecture, denoiser=denoiser,
+                   epsilon=args.epsilon)
     print("\n[-] Module 3 complete.")
 
 
@@ -2438,7 +2441,7 @@ if __name__ == "__main__":
                         help="Target layer index, or 'all' for layers 10,15,20,25")
 
     # Architecture
-    parser.add_argument("--architecture", type=str, default="mlp",
+    parser.add_argument("--architecture", type=str, default="cvae",
                         choices=["mlp", "cvae"],
                         help="Generator architecture: mlp or cvae")
     parser.add_argument("--z-dim", type=int, default=64,
@@ -2452,7 +2455,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr-reward", type=float, default=1e-3)
 
     # RL hyperparameters
-    parser.add_argument("--epsilon", type=float, default=0.15,
+    parser.add_argument("--epsilon", type=float, default=0.1,
                         help="Norm constraint: ||delta_f|| <= eps * ||f_L||")
     parser.add_argument("--rl-steps", type=int, default=5000)
     parser.add_argument("--alpha-diversity", type=float, default=0.1,

@@ -116,24 +116,38 @@ def ensure_figures_dir(layer_idx: int) -> Path:
 # ║  Section 2: PCA Dimensionality Reduction                                 ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-def fit_pca(delta_f_np: np.ndarray, n_components: int = 50) -> tuple:
+def fit_pca(data_np: np.ndarray, n_components: int = 50,
+            min_variance: float = 0.90) -> tuple:
     """
-    Fit PCA on delta_f vectors.
+    Fit PCA on data vectors, auto-increasing n_components until
+    cumulative variance >= min_variance (default 90%).
 
     Returns (pca_model, transformed_data, cumulative_variance).
-    Warns if cumulative variance < 90%.
     """
-    n_comp = min(n_components, delta_f_np.shape[0], delta_f_np.shape[1])
-    pca = PCA(n_components=n_comp)
-    transformed = pca.fit_transform(delta_f_np)
+    max_comp = min(data_np.shape[0], data_np.shape[1])
+    n_comp = min(n_components, max_comp)
 
+    pca = PCA(n_components=n_comp)
+    transformed = pca.fit_transform(data_np)
     cumulative_var = np.sum(pca.explained_variance_ratio_)
-    print(f"  PCA: {delta_f_np.shape[1]}D → {n_comp}D")
+
+    # Auto-increase if variance < threshold
+    if cumulative_var < min_variance and n_comp < max_comp:
+        original_n = n_comp
+        while cumulative_var < min_variance and n_comp < max_comp:
+            n_comp = min(n_comp * 2, max_comp)
+            pca = PCA(n_components=n_comp)
+            transformed = pca.fit_transform(data_np)
+            cumulative_var = np.sum(pca.explained_variance_ratio_)
+        print(f"  PCA: auto-increased {original_n} → {n_comp} dims "
+              f"to reach {cumulative_var*100:.1f}% variance")
+
+    print(f"  PCA: {data_np.shape[1]}D → {n_comp}D")
     print(f"  Cumulative variance retained: {cumulative_var:.4f} ({cumulative_var*100:.1f}%)")
 
-    if cumulative_var < 0.90:
-        print(f"  [WARN] Variance < 90%. Paper requires >90%. "
-              f"Consider increasing --n-pca-dims.")
+    if cumulative_var < min_variance:
+        print(f"  [WARN] Variance {cumulative_var*100:.1f}% < {min_variance*100:.0f}% "
+              f"even at max components ({n_comp}).")
 
     return pca, transformed, cumulative_var
 
@@ -390,12 +404,24 @@ def run_clustering(
 
     # Load data
     perturbation_data = load_successful_perturbations(layer_idx)
-    delta_f = perturbation_data["delta_f"].numpy()
-    print(f"  Loaded {len(delta_f)} successful perturbation vectors")
-    print(f"  Dimensionality: {delta_f.shape[1]}")
+    delta_f = perturbation_data["delta_f"]
+    f_L = perturbation_data["f_L"]
+
+    if f_L is not None and len(f_L) == len(delta_f):
+        # Compute corrupted activations: f_corrupted = f_L + delta_f
+        # This ensures PCA/clusters are in activation space (same as Module 7 input)
+        cluster_input = (f_L + delta_f).numpy()
+        print(f"  Loaded {len(delta_f)} successful perturbations")
+        print(f"  Clustering corrupted activations (f_L + delta_f) in activation space")
+    else:
+        # Fallback: cluster raw delta_f (legacy behavior)
+        cluster_input = delta_f.numpy()
+        print(f"  [WARN] No f_L available, clustering raw delta_f (legacy mode)")
+
+    print(f"  Dimensionality: {cluster_input.shape[1]}")
 
     # ── Step 1: PCA ──────────────────────────────────────────────────────
-    pca_model, pca_data, cumulative_var = fit_pca(delta_f, n_pca_dims)
+    pca_model, pca_data, cumulative_var = fit_pca(cluster_input, n_pca_dims)
 
     # ── Step 2: K-means ──────────────────────────────────────────────────
     max_k = min(k_max, len(pca_data))  # can't have more clusters than samples
@@ -409,6 +435,16 @@ def run_clustering(
 
     # ── Step 3: DBSCAN ───────────────────────────────────────────────────
     dbscan_results = run_dbscan(pca_data, min_samples=dbscan_min_samples)
+
+    # Cross-validate K-means K* against DBSCAN cluster count
+    dbscan_k = dbscan_results["n_clusters"]
+    if dbscan_k > 0 and k_star > 0:
+        diff_ratio = abs(dbscan_k - k_star) / max(dbscan_k, k_star)
+        if diff_ratio > 0.5:
+            print(f"  [WARN] DBSCAN found {dbscan_k} clusters vs K-means K*={k_star} "
+                  f"({diff_ratio*100:.0f}% difference). Consider reviewing clustering.")
+        else:
+            print(f"  DBSCAN validation: {dbscan_k} clusters vs K-means K*={k_star} (consistent)")
 
     # ── Step 4: Cluster metrics ──────────────────────────────────────────
     metrics = compute_cluster_metrics(pca_data, km_labels, km_centers)
@@ -484,7 +520,8 @@ def run_clustering(
     # Save full results as JSON
     results = {
         "layer": layer_idx,
-        "n_successful_perturbations": len(delta_f),
+        "n_successful_perturbations": len(cluster_input),
+        "cluster_space": "corrupted_activations" if f_L is not None else "delta_f",
         "pca": {
             "n_components": int(pca_model.n_components_),
             "cumulative_variance": float(cumulative_var),

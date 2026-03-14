@@ -53,7 +53,7 @@ HARMFUL_DATASETS = [
     },
     {
         "name": "walledai/HarmBench",
-        "config": None,
+        "config": "standard",
         "text_fields": ["prompt", "goal", "text"],
         "split": "train",
         "needs_token": True,
@@ -62,7 +62,7 @@ HARMFUL_DATASETS = [
         "name": "JailbreakBench/JBB-Behaviors",
         "config": "behaviors",
         "text_fields": ["Goal", "goal", "prompt", "text"],
-        "split": "train",
+        "split": "harmful",
         "needs_token": False,
     },
 ]

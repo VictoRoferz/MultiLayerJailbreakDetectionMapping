@@ -1,0 +1,9 @@
+torch>=2.0
+transformers>=4.35
+datasets>=2.14
+scikit-learn>=1.3
+numpy>=1.24
+matplotlib>=3.7
+tqdm>=4.65
+umap-learn>=0.5
+openai>=1.0  # optional: for GPT-4 judge

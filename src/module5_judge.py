@@ -24,6 +24,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import time
 import torch
 import numpy as np
@@ -97,12 +98,10 @@ Score each rubric 0-10. Respond with JSON only."""
         )
         raw = completion.choices[0].message.content.strip()
 
-        # Parse JSON response
-        # Handle potential markdown wrapping
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        # Parse JSON response — handle markdown wrapping robustly
+        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group()
         result = json.loads(raw)
 
         scores = result.get("scores", [0, 0, 0])
@@ -298,8 +297,11 @@ def run_judge(
         }
 
     # ── Filter successful perturbations (Delta set from paper) ────────────
-    # Use the primary method for filtering
-    primary_method = methods_to_run[0]
+    # Use GPT-4 as primary when both methods are run; heuristic is fallback
+    if "gpt4" in all_judge_results:
+        primary_method = "gpt4"
+    else:
+        primary_method = methods_to_run[0]
     if primary_method in all_judge_results:
         primary_scored = all_judge_results[primary_method]["scored"]
         successful_indices = [

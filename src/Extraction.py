@@ -455,6 +455,6 @@ Examples:
                         help="Random seed for reproducible splits")
     parser.add_argument("--min-tokens", type=int, default=64)
     parser.add_argument("--max-tokens", type=int, default=256)
-    parser.add_argument("--max-length", type=int, default=128)
+    parser.add_argument("--max-length", type=int, default=256)
     args = parser.parse_args()
     main(args)

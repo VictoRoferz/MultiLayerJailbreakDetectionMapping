@@ -229,28 +229,46 @@ def random_direction_baseline(benign_acts: np.ndarray, harmful_acts: np.ndarray,
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def load_activations_for_eval(layer_idx: int) -> dict:
-    """Load benign and harmful activations for detector evaluation."""
+    """
+    Load activations for detector evaluation.
+
+    Uses val split for calibration (threshold tuning) and test split for
+    evaluation to prevent data leakage.
+    """
     base = Path("artifacts") / f"layer_{layer_idx}"
 
-    # Try split files first
-    if (base / "test_activations.pt").exists():
-        data = torch.load(base / "test_activations.pt", weights_only=False)
+    # Load val split for calibration
+    val_path = base / "val_activations.pt"
+    test_path = base / "test_activations.pt"
+
+    if val_path.exists() and test_path.exists():
+        print("  Using val split for calibration, test split for evaluation")
+        val_data = torch.load(val_path, weights_only=False)
+        val_acts = val_data["activations"].numpy()
+        val_labels = val_data["labels"].numpy()
+        calibration_benign = val_acts[val_labels == 0.0]
+
+        test_data = torch.load(test_path, weights_only=False)
+        test_acts = test_data["activations"].numpy()
+        test_labels = test_data["labels"].numpy()
+        test_benign = test_acts[test_labels == 0.0]
+        harmful = test_acts[test_labels == 1.0]
+    elif test_path.exists():
+        # Fallback: only test split available, split benign for calibration
+        print("  [WARN] No val split found, splitting test benign for calibration")
+        data = torch.load(test_path, weights_only=False)
         all_acts = data["activations"].numpy()
         all_labels = data["labels"].numpy()
-    elif (base / "activations.pt").exists():
-        data = torch.load(base / "activations.pt", weights_only=False)
-        all_acts = data["activations"].numpy()
-        all_labels = data["labels"].numpy()
+        benign = all_acts[all_labels == 0.0]
+        harmful = all_acts[all_labels == 1.0]
+        n_cal = len(benign) // 2
+        calibration_benign = benign[:n_cal]
+        test_benign = benign[n_cal:]
     else:
-        raise FileNotFoundError(f"No activations at {base}")
-
-    benign = all_acts[all_labels == 0.0]
-    harmful = all_acts[all_labels == 1.0]
-
-    # Split benign into calibration (first 50%) and test (last 50%)
-    n_cal = len(benign) // 2
-    calibration_benign = benign[:n_cal]
-    test_benign = benign[n_cal:]
+        raise FileNotFoundError(
+            f"No split activation files at {base}. "
+            f"Run Extraction.py first to create val/test splits."
+        )
 
     return {
         "calibration_benign": calibration_benign,

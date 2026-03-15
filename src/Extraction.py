@@ -5,8 +5,8 @@ Extraction.py
 
 Module 1 — Data Preparation:
     - Loads WikiText-103 as the benign corpus (capped at --n-samples, default 10000).
-    - Loads harmful prompts from 4 datasets:
-        TrustAIRLab, AdvBench, HarmBench, JailbreakBench
+    - Loads harmful prompts from 5 datasets:
+        TrustAIRLab, AdvBench, HarmBench, JailbreakBench, SaladBench
     - Filters benign to [64, 256] tokens, harmful to [16, 256] tokens.
     - Splits both into 70/10/20 train/val/test with fixed seed.
 
@@ -63,6 +63,13 @@ HARMFUL_DATASETS = [
         "config": "behaviors",
         "text_fields": ["Goal", "goal", "prompt", "text"],
         "split": "harmful",
+        "needs_token": False,
+    },
+    {
+        "name": "walledai/SaladBench",
+        "config": "prompts",
+        "text_fields": ["prompt", "text", "question"],
+        "split": "base",
         "needs_token": False,
     },
 ]

@@ -947,7 +947,7 @@ def recalibrate_reward_model(
     passages: list = None,
     layer_idx: int = 20,
     n_recal_samples: int = 100,
-    recal_epochs: int = 10,
+    recal_epochs: int = 3,
     batch_size: int = 128,
 ) -> dict:
     """
@@ -1002,8 +1002,8 @@ def recalibrate_reward_model(
 
     # Step 3: Build recalibration dataset
     # Combine: original benign/harmful (subsample) + generator perturbations with real labels
-    n_benign_sub = min(500, len(benign_acts))
-    n_harmful_sub = min(500, len(harmful_acts))
+    n_benign_sub = min(3000, len(benign_acts))
+    n_harmful_sub = min(1500, len(harmful_acts))
     recal_acts = torch.cat([
         benign_acts[:n_benign_sub],
         harmful_acts[:n_harmful_sub],
@@ -1025,7 +1025,7 @@ def recalibrate_reward_model(
     for p in reward_model.parameters():
         p.requires_grad_(True)
 
-    optimizer = torch.optim.Adam(reward_model.parameters(), lr=5e-4)
+    optimizer = torch.optim.Adam(reward_model.parameters(), lr=1e-4)
     dataset = TensorDataset(recal_acts, recal_all_labels)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
@@ -1238,7 +1238,7 @@ def train_rl(
         if (llm_model is not None and (step + 1) % validation_interval == 0):
             val_result = validate_with_llm(
                 generator, llm_model, llm_tokenizer,
-                passages[:50] if passages else [],
+                passages[:200] if passages else [],
                 layer_idx, epsilon, device,
                 n_perturbations=1,
             )

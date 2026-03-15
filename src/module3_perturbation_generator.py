@@ -1255,13 +1255,19 @@ def train_rl(
         # Online reward model recalibration
         if (harmful_acts is not None and recalibration_interval > 0
                 and (step + 1) % recalibration_interval == 0):
-            recal_result = recalibrate_reward_model(
-                reward_model, generator, benign_acts, harmful_acts,
-                device, epsilon, llm_model, llm_tokenizer,
-                passages, layer_idx,
-            )
-            logs["recalibrations"].append({"step": step + 1, **recal_result})
-            generator.train()  # Switch back to train mode after recalibration
+            # Skip recalibration if the last one already overfitted (loss < 0.01)
+            last_recal_loss = (logs["recalibrations"][-1]["recal_loss"]
+                               if logs["recalibrations"] else 1.0)
+            if last_recal_loss >= 0.01:
+                recal_result = recalibrate_reward_model(
+                    reward_model, generator, benign_acts, harmful_acts,
+                    device, epsilon, llm_model, llm_tokenizer,
+                    passages, layer_idx,
+                )
+                logs["recalibrations"].append({"step": step + 1, **recal_result})
+                generator.train()  # Switch back to train mode after recalibration
+            else:
+                print(f"\n    --- Skipping recalibration (last loss={last_recal_loss:.4f} < 0.01) ---")
 
     generator.eval()
     return logs
@@ -1278,7 +1284,7 @@ def train_frank_wolfe(
     device: torch.device,
     n_iterations: int = 3,
     rl_steps_per_iter: int = 2000,
-    lambda_fw: float = 0.5,
+    lambda_fw: float = 0.2,
     llm_model=None,
     llm_tokenizer=None,
     passages: list = None,
@@ -2612,7 +2618,7 @@ if __name__ == "__main__":
     # Frank-Wolfe
     parser.add_argument("--fw-iterations", type=int, default=3)
     parser.add_argument("--fw-rl-steps", type=int, default=5000)
-    parser.add_argument("--lambda-fw", type=float, default=0.5,
+    parser.add_argument("--lambda-fw", type=float, default=0.2,
                         help="Frank-Wolfe penalty weight")
 
     # Denoiser (GLP-style on-manifold projection)

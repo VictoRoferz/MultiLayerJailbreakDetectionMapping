@@ -935,6 +935,125 @@ def compute_entropy_bonus(delta_f: torch.Tensor) -> torch.Tensor:
     return log_det
 
 
+def recalibrate_reward_model(
+    reward_model: RewardModel,
+    generator: nn.Module,
+    benign_acts: torch.Tensor,
+    harmful_acts: torch.Tensor,
+    device: torch.device,
+    epsilon: float,
+    llm_model=None,
+    llm_tokenizer=None,
+    passages: list = None,
+    layer_idx: int = 20,
+    n_recal_samples: int = 100,
+    recal_epochs: int = 10,
+    batch_size: int = 128,
+) -> dict:
+    """
+    Online reward model recalibration.
+
+    Generates perturbations with the current generator, validates them
+    against the actual LLM, and retrains the reward model with the
+    new (perturbed_activation, real_label) pairs.
+
+    This prevents the proxy reward from becoming stale as the generator
+    explores new regions of activation space.
+    """
+    print(f"\n    --- Reward Model Recalibration ---")
+
+    generator.eval()
+
+    # Step 1: Generate perturbations with current generator
+    n_use = min(n_recal_samples, len(benign_acts))
+    f_L_sample = benign_acts[:n_use].to(device)
+    z = torch.randn(n_use, generator.z_dim, device=device)
+    with torch.no_grad():
+        delta_f = generator(z, f_L_sample)
+        delta_f = apply_norm_constraint(delta_f, f_L_sample, epsilon)
+        perturbed_acts = (f_L_sample + delta_f).cpu()
+
+    # Step 2: Get real labels from LLM validation (if available)
+    real_labels = []
+    if llm_model is not None and passages:
+        val_result = validate_with_llm(
+            generator, llm_model, llm_tokenizer,
+            passages[:n_use], layer_idx, epsilon, device,
+            n_perturbations=1,
+        )
+        # Build labels from validation outputs
+        for output in val_result["outputs"]:
+            real_labels.append(1.0 if output["is_jailbreak"] else 0.0)
+        # Pad if fewer outputs than perturbed_acts (some passages may skip)
+        while len(real_labels) < n_use:
+            real_labels.append(0.5)  # uncertain label for unvalidated
+        print(f"    LLM validation: {val_result['n_jailbreaks']}/{val_result['n_tested']} "
+              f"jailbreaks ({val_result['asr']:.1%} ASR)")
+    else:
+        # No LLM available — use reward model's own predictions as soft labels
+        # (less effective but still helps by exposing the reward model to the
+        # generator's current output distribution)
+        with torch.no_grad():
+            pred_probs = torch.sigmoid(reward_model(perturbed_acts.to(device)))
+        real_labels = pred_probs.cpu().tolist()
+        print(f"    No LLM available — using soft self-labels")
+
+    recal_labels = torch.tensor(real_labels[:n_use], dtype=torch.float32)
+
+    # Step 3: Build recalibration dataset
+    # Combine: original benign/harmful (subsample) + generator perturbations with real labels
+    n_benign_sub = min(500, len(benign_acts))
+    n_harmful_sub = min(500, len(harmful_acts))
+    recal_acts = torch.cat([
+        benign_acts[:n_benign_sub],
+        harmful_acts[:n_harmful_sub],
+        perturbed_acts[:n_use],
+    ])
+    recal_all_labels = torch.cat([
+        torch.zeros(n_benign_sub),
+        torch.ones(n_harmful_sub),
+        recal_labels,
+    ])
+
+    # Shuffle
+    perm = torch.randperm(len(recal_acts))
+    recal_acts = recal_acts[perm].to(device)
+    recal_all_labels = recal_all_labels[perm].to(device)
+
+    # Step 4: Fine-tune reward model
+    reward_model.train()
+    for p in reward_model.parameters():
+        p.requires_grad_(True)
+
+    optimizer = torch.optim.Adam(reward_model.parameters(), lr=5e-4)
+    dataset = TensorDataset(recal_acts, recal_all_labels)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    for epoch in range(recal_epochs):
+        epoch_loss = 0.0
+        n_batches = 0
+        for acts_batch, labels_batch in loader:
+            logits = reward_model(acts_batch)
+            loss = F.binary_cross_entropy_with_logits(logits, labels_batch)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+            n_batches += 1
+
+    avg_loss = epoch_loss / max(n_batches, 1)
+    print(f"    Recalibration done ({recal_epochs} epochs, "
+          f"loss={avg_loss:.4f}, "
+          f"{len(recal_acts)} samples)")
+
+    # Freeze reward model again for RL
+    reward_model.eval()
+    for p in reward_model.parameters():
+        p.requires_grad_(False)
+
+    return {"recal_loss": avg_loss, "n_samples": len(recal_acts)}
+
+
 def train_rl(
     generator: PerturbationGenerator,
     reward_model: RewardModel,
@@ -953,6 +1072,8 @@ def train_rl(
     layer_idx: int = 20,
     previous_generators: list = None,
     lambda_fw: float = 0.0,
+    harmful_acts: torch.Tensor = None,
+    recalibration_interval: int = 1000,
 ) -> dict:
     """
     Phase 2 (+3): Direct gradient optimization with proxy reward, diversity
@@ -1003,12 +1124,15 @@ def train_rl(
         "losses": [],
         "grad_norms": [],
         "llm_validations": [],
+        "recalibrations": [],
     }
 
     print(f"\n{'='*60}")
     print(f"  Phase 2: RL Training")
     print(f"  Steps: {n_steps}, Batch: {batch_size}")
     print(f"  Diversity alpha: {alpha_diversity}, Entropy gamma: {gamma_entropy}")
+    if harmful_acts is not None and recalibration_interval > 0:
+        print(f"  Online recalibration every {recalibration_interval} steps")
     if lambda_fw > 0:
         print(f"  Frank-Wolfe lambda: {lambda_fw}, "
               f"Previous generators: {len(previous_generators)}")
@@ -1128,6 +1252,17 @@ def train_rl(
                   f"({val_result['n_jailbreaks']}/{val_result['n_tested']})")
             generator.train()
 
+        # Online reward model recalibration
+        if (harmful_acts is not None and recalibration_interval > 0
+                and (step + 1) % recalibration_interval == 0):
+            recal_result = recalibrate_reward_model(
+                reward_model, generator, benign_acts, harmful_acts,
+                device, epsilon, llm_model, llm_tokenizer,
+                passages, layer_idx,
+            )
+            logs["recalibrations"].append({"step": step + 1, **recal_result})
+            generator.train()  # Switch back to train mode after recalibration
+
     generator.eval()
     return logs
 
@@ -1148,6 +1283,7 @@ def train_frank_wolfe(
     llm_tokenizer=None,
     passages: list = None,
     layer_idx: int = 20,
+    harmful_acts: torch.Tensor = None,
     **rl_kwargs,
 ) -> tuple:
     """
@@ -1216,6 +1352,7 @@ def train_frank_wolfe(
             llm_tokenizer=llm_tokenizer,
             passages=passages,
             layer_idx=layer_idx,
+            harmful_acts=harmful_acts,
             **rl_kwargs,
         )
         iter_logs["fw_iteration"] = i + 1
@@ -2335,6 +2472,8 @@ def main(args):
             llm_tokenizer=llm_tokenizer,
             passages=passages,
             layer_idx=args.layer,
+            harmful_acts=harmful_acts,
+            recalibration_interval=args.recalibration_interval,
         )
         all_logs["rl"] = rl_logs
 
@@ -2353,12 +2492,14 @@ def main(args):
             llm_tokenizer=llm_tokenizer,
             passages=passages,
             layer_idx=args.layer,
+            harmful_acts=harmful_acts,
             lr=args.lr_rl,
             batch_size=args.batch_size,
             epsilon=args.epsilon,
             alpha_diversity=args.alpha_diversity,
             gamma_entropy=args.gamma_entropy,
             validation_interval=args.validation_interval,
+            recalibration_interval=args.recalibration_interval,
         )
         all_logs["frank_wolfe"] = fw_logs
 
@@ -2465,6 +2606,8 @@ if __name__ == "__main__":
     parser.add_argument("--gamma-entropy", type=float, default=0.01,
                         help="Entropy bonus weight")
     parser.add_argument("--validation-interval", type=int, default=500)
+    parser.add_argument("--recalibration-interval", type=int, default=1000,
+                        help="Recalibrate reward model every N RL steps (0 to disable)")
 
     # Frank-Wolfe
     parser.add_argument("--fw-iterations", type=int, default=3)

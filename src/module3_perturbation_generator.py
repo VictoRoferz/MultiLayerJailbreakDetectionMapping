@@ -1195,10 +1195,10 @@ def train_rl(
         #    discriminator gives gradients to the generator). The reward model's
         #    own weights stay frozen — only the generator learns.
         reward = torch.sigmoid(reward_model(f_prime))  # [B]
-        # Clip reward to [0.05, 0.95] to prevent saturation and keep
-        # gradients flowing. Without this, reward hits 0.999 and the
-        # generator gets zero gradient signal for further improvement.
-        reward = reward.clamp(0.05, 0.95)
+        # Clip reward to [0.05, 0.80] to prevent saturation and keep
+        # gradients flowing. The 0.80 ceiling ensures the generator always
+        # has meaningful gradient signal to find better jailbreak directions.
+        reward = reward.clamp(0.05, 0.80)
 
         # 7. Frank-Wolfe penalty: similarity to previous generators
         #    Uses SAME z as current generator so cosine sim measures actual
@@ -2656,7 +2656,7 @@ if __name__ == "__main__":
     parser.add_argument("--gamma-entropy", type=float, default=0.01,
                         help="Entropy bonus weight")
     parser.add_argument("--validation-interval", type=int, default=2000)
-    parser.add_argument("--recalibration-interval", type=int, default=1000,
+    parser.add_argument("--recalibration-interval", type=int, default=500,
                         help="Recalibrate reward model every N RL steps (0 to disable)")
 
     # Frank-Wolfe

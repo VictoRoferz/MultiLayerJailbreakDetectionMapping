@@ -19,7 +19,7 @@ Requires a CUDA-capable GPU for training and generation.
 python src/Extraction.py --layers 20 --n-samples 10000 --n-harmful 5000
 
 # 2. Train perturbation generator
-python src/module3_perturbation_generator.py --layer 20 --phase all --epsilon 0.15 --recalibration-interval 1000
+python src/module3_perturbation_generator.py --layer 20 --phase all --epsilon 0.5 --recalibration-interval 1000
 
 # 3. Run corruption, judge, clustering, and detector
 python src/pipeline.py --layer 20 --modules all
@@ -112,7 +112,7 @@ python src/module3_perturbation_generator.py --layer 20 --phase diagnose
 | `--phase` | str | "all" | `all`, `warmup`, `reward`, `rl`, `frank-wolfe`, `validate`, `denoiser`, `diagnose` |
 | `--layer` | str | "20" | Layer index or `all` |
 | `--architecture` | str | "cvae" | `mlp` or `cvae` |
-| `--epsilon` | float | 0.1 | Norm constraint |
+| `--epsilon` | float | 0.5 | Norm constraint |
 | `--batch-size` | int | 128 | Training batch size |
 
 **Architecture:**
@@ -134,10 +134,10 @@ python src/module3_perturbation_generator.py --layer 20 --phase diagnose
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--rl-steps` | int | 5000 | Number of RL training steps |
+| `--rl-steps` | int | 3000 | Number of RL training steps |
 | `--alpha-diversity` | float | 0.1 | Diversity loss weight |
 | `--gamma-entropy` | float | 0.01 | Entropy bonus weight |
-| `--validation-interval` | int | 500 | LLM validation every N steps |
+| `--validation-interval` | int | 2000 | LLM validation every N steps |
 | `--recalibration-interval` | int | 1000 | Reward model recalibration every N steps (0 = disable) |
 
 **Frank-Wolfe:**
@@ -145,8 +145,8 @@ python src/module3_perturbation_generator.py --layer 20 --phase diagnose
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--fw-iterations` | int | 3 | Number of Frank-Wolfe iterations |
-| `--fw-rl-steps` | int | 5000 | RL steps per FW iteration |
-| `--lambda-fw` | float | 0.5 | FW diversity penalty weight |
+| `--fw-rl-steps` | int | 3000 | RL steps per FW iteration |
+| `--lambda-fw` | float | 0.2 | FW diversity penalty weight |
 
 **Denoiser (optional):**
 
@@ -171,7 +171,7 @@ python src/module4_corruption.py --layer 20 --K 500 --max-passages 200
 | `--layer` | str | "20" | Layer index or `all` |
 | `--architecture` | str | "cvae" | `mlp` or `cvae` |
 | `--K` | int | 500 | Perturbation samples per passage |
-| `--epsilon` | float | 0.1 | Norm constraint |
+| `--epsilon` | float | 0.5 | Norm constraint |
 | `--max-passages` | int | None | Max passages to process (None = all) |
 | `--max-new-tokens` | int | 256 | Max tokens for generation |
 | `--denoiser-steps` | int | 20 | Denoising steps |
@@ -254,7 +254,7 @@ python src/pipeline.py --layer all --modules all
 | `--force` | flag | -- | Force re-run even if artifacts exist |
 | `--architecture` | str | "cvae" | `mlp` or `cvae` |
 | `--K` | int | 500 | Perturbation samples per passage |
-| `--epsilon` | float | 0.1 | Norm constraint |
+| `--epsilon` | float | 0.5 | Norm constraint |
 | `--max-passages` | int | None | Max passages to process |
 | `--judge-method` | str | "heuristic" | `gpt4`, `heuristic`, or `both` |
 | `--judge-threshold` | float | 7.0 | Jailbreak score threshold |
@@ -311,3 +311,4 @@ python src/module7_detector.py --layer 20
 python src/Extraction.py --layers 10 15 20 25 --n-samples 10000 --n-harmful 5000
 python src/pca_analysis.py --layer all
 ```
+

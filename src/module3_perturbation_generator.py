@@ -1195,6 +1195,10 @@ def train_rl(
         #    discriminator gives gradients to the generator). The reward model's
         #    own weights stay frozen — only the generator learns.
         reward = torch.sigmoid(reward_model(f_prime))  # [B]
+        # Clip reward to [0.05, 0.95] to prevent saturation and keep
+        # gradients flowing. Without this, reward hits 0.999 and the
+        # generator gets zero gradient signal for further improvement.
+        reward = reward.clamp(0.05, 0.95)
 
         # 7. Frank-Wolfe penalty: similarity to previous generators
         #    Uses SAME z as current generator so cosine sim measures actual

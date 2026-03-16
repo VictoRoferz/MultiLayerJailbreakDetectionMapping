@@ -802,6 +802,20 @@ def train_reward_model(
     acts, labels = create_reward_dataset(benign_acts, harmful_acts)
     print(f"  Total (with interpolation): {len(acts)}")
 
+    # Augment with random-direction perturbations at epsilon scale (label=0).
+    # This teaches the reward model that "large perturbation ≠ jailbreak" —
+    # random directions at epsilon scale should score as benign, preventing
+    # the reward model from giving 1.0 to anything far from the benign center.
+    n_random = min(1000, len(benign_acts))
+    b_random = benign_acts[:n_random].to(device)
+    random_delta = torch.randn_like(b_random)
+    random_delta = apply_norm_constraint(random_delta, b_random, epsilon)
+    random_perturbed = (b_random + random_delta).cpu()
+    random_labels = torch.zeros(n_random)  # benign — random direction, not jailbreak
+    acts = torch.cat([acts, random_perturbed])
+    labels = torch.cat([labels, random_labels])
+    print(f"  + {n_random} random-direction perturbations at eps={epsilon:.2f} (label=0)")
+
     # Augment with generator-produced perturbations (if available)
     if generator is not None:
         generator.eval()
@@ -815,9 +829,11 @@ def train_reward_model(
         gen_labels = torch.full((n_gen,), 0.5)
         acts = torch.cat([acts, perturbed])
         labels = torch.cat([labels, gen_labels])
-        perm = torch.randperm(len(acts))
-        acts, labels = acts[perm], labels[perm]
         print(f"  + {n_gen} generator-produced perturbations (label=0.5)")
+
+    # Shuffle all data
+    perm = torch.randperm(len(acts))
+    acts, labels = acts[perm], labels[perm]
 
     print(f"  Total (final): {len(acts)}")
 

@@ -431,8 +431,10 @@ class RewardModel(nn.Module):
             nn.Linear(activation_dim, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(512, 128),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(128, 1),
         )
 
@@ -1138,15 +1140,20 @@ def train_rl(
               f"Previous generators: {len(previous_generators)}")
     print(f"{'='*60}")
 
-    # Epsilon warmup: start at 50% of target, linearly increase to full.
-    # This lets the generator learn coarse directions before applying full-strength
-    # perturbations that the reward model can evaluate properly.
-    eps_warmup_steps = min(500, n_steps // 5)
+    # Epsilon curriculum: start at 30% of target, ramp to full over 20% of steps.
+    # Lets the generator learn easy directions first (small perturbations),
+    # then push harder. More gradual = better gradient signal early on.
+    eps_warmup_steps = int(0.2 * n_steps)
+
+    # Early stopping: stop if ASR doesn't improve for 2 consecutive validations
+    best_asr = 0.0
+    patience_counter = 0
+    patience_limit = 2
 
     for step in range(n_steps):
         # Epsilon schedule
         if step < eps_warmup_steps:
-            current_epsilon = epsilon * (0.5 + 0.5 * step / eps_warmup_steps)
+            current_epsilon = epsilon * (0.3 + 0.7 * step / eps_warmup_steps)
         else:
             current_epsilon = epsilon
 
@@ -1196,9 +1203,14 @@ def train_rl(
             diversity_loss = sum(cos_penalties) / len(cos_penalties)
 
         # 8. Policy loss: maximize reward + direct diversity gradient
-        #    Only use direct cosine loss (not reward shaping) to avoid
-        #    double-counting the FW penalty.
-        policy_loss = -reward.mean() + lambda_fw * diversity_loss
+        #    Adaptive lambda: ramp from 0 to lambda_fw over first 30% of steps
+        #    so the generator learns reward signal before being penalized.
+        if previous_generators and lambda_fw > 0:
+            ramp_steps = int(0.3 * n_steps)
+            current_lambda = lambda_fw * min(1.0, step / max(ramp_steps, 1))
+        else:
+            current_lambda = 0.0
+        policy_loss = -reward.mean() + current_lambda * diversity_loss
 
         # 9. Diversity loss
         div_loss = compute_diversity_loss(delta_f_constrained)
@@ -1238,7 +1250,7 @@ def train_rl(
         if (llm_model is not None and (step + 1) % validation_interval == 0):
             val_result = validate_with_llm(
                 generator, llm_model, llm_tokenizer,
-                passages[:200] if passages else [],
+                passages[:100] if passages else [],
                 layer_idx, epsilon, device,
                 n_perturbations=1,
             )
@@ -1251,6 +1263,18 @@ def train_rl(
                   f"ASR = {val_result['asr']:.1%} "
                   f"({val_result['n_jailbreaks']}/{val_result['n_tested']})")
             generator.train()
+
+            # Early stopping check
+            current_asr = val_result["asr"]
+            if current_asr > best_asr + 0.01:  # 1% improvement threshold
+                best_asr = current_asr
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            if patience_counter >= patience_limit:
+                print(f"    >>> Early stopping: ASR hasn't improved for "
+                      f"{patience_limit} consecutive validations (best={best_asr:.1%})")
+                break
 
         # Online reward model recalibration
         if (harmful_acts is not None and recalibration_interval > 0
@@ -2604,20 +2628,20 @@ if __name__ == "__main__":
     parser.add_argument("--lr-reward", type=float, default=1e-3)
 
     # RL hyperparameters
-    parser.add_argument("--epsilon", type=float, default=0.1,
+    parser.add_argument("--epsilon", type=float, default=0.5,
                         help="Norm constraint: ||delta_f|| <= eps * ||f_L||")
-    parser.add_argument("--rl-steps", type=int, default=5000)
+    parser.add_argument("--rl-steps", type=int, default=3000)
     parser.add_argument("--alpha-diversity", type=float, default=0.1,
                         help="Diversity loss weight")
     parser.add_argument("--gamma-entropy", type=float, default=0.01,
                         help="Entropy bonus weight")
-    parser.add_argument("--validation-interval", type=int, default=500)
+    parser.add_argument("--validation-interval", type=int, default=2000)
     parser.add_argument("--recalibration-interval", type=int, default=1000,
                         help="Recalibrate reward model every N RL steps (0 to disable)")
 
     # Frank-Wolfe
     parser.add_argument("--fw-iterations", type=int, default=3)
-    parser.add_argument("--fw-rl-steps", type=int, default=5000)
+    parser.add_argument("--fw-rl-steps", type=int, default=3000)
     parser.add_argument("--lambda-fw", type=float, default=0.2,
                         help="Frank-Wolfe penalty weight")
 

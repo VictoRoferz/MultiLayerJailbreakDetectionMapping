@@ -59,9 +59,12 @@ def extract_activation(model, tokenizer, text: str, layer_idx: int,
     Extract activation f_L(x) for a single passage.
     Returns [D] tensor (mean of last k token positions at layer L).
     """
+    # For multi-GPU models (device_map="auto"), inputs must go to
+    # the model's first device, not necessarily cuda:0
+    input_device = model.get_input_embeddings().weight.device
     inputs = tokenizer(
         text, return_tensors="pt", truncation=True, max_length=256
-    ).to(device)
+    ).to(input_device)
 
     with torch.no_grad():
         outputs = model(**inputs)
@@ -331,9 +334,14 @@ def run_corruption_loop(
             continue
 
         # Tokenize once for generation
+        # For multi-GPU models, send inputs to model's first device
+        if hasattr(model, 'hf_device_map'):
+            input_device = next(model.parameters()).device
+        else:
+            input_device = device
         inputs = tokenizer(
             text, return_tensors="pt", truncation=True, max_length=256
-        ).to(device)
+        ).to(input_device)
 
         seq_len = inputs["input_ids"].shape[1]
         k_positions = min(5, seq_len)

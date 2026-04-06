@@ -1389,6 +1389,21 @@ def train_frank_wolfe(
                 torch.randn_like(out_layer.bias) * 0.1
             )
 
+        # Pre-recalibrate reward model for this FW generator.
+        # The reward model was calibrated to the previous generator's outputs.
+        # The new generator (perturbed copy) produces different perturbations
+        # that the reward model hasn't seen, causing reward=0 for ~1000 steps.
+        # Recalibrating first ensures the reward model gives useful signal
+        # from step 1.
+        if harmful_acts is not None and llm_model is not None:
+            print(f"    Pre-recalibrating reward model for FW iteration {i+1}...")
+            recal_result = recalibrate_reward_model(
+                reward_model, gen_copy, benign_acts, harmful_acts,
+                device, rl_kwargs.get("epsilon", 0.1),
+                llm_model, llm_tokenizer, passages, layer_idx,
+            )
+            print(f"    Pre-recalibration done (loss={recal_result['recal_loss']:.4f})")
+
         # Train with FW penalty
         iter_logs = train_rl(
             generator=gen_copy,

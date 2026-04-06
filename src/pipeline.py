@@ -125,7 +125,7 @@ def run_pipeline(
                 architecture=architecture,
                 phase="all",
                 epsilon=epsilon,
-                z_dim=64 if architecture == "cvae" else 64,
+                z_dim=32 if architecture == "cvae" else 64,
                 n_rl_steps=5000,
                 n_fw_iterations=3,
             )

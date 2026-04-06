@@ -130,6 +130,82 @@ class SubspaceDetector:
         )
 
 
+class MultiLayerDetector:
+    """
+    Combines detectors from multiple layers with a learned combiner.
+
+    Why not just take the min score across layers?
+        4 independent detectors each at FPR=2% gives:
+            FPR_combined = 1 - (1-0.02)^4 ≈ 7.8%
+        A learned combiner (logistic regression on 4 distances) can
+        achieve the target FPR=2% for the combined detector.
+    """
+
+    def __init__(self, layer_detectors: dict):
+        """
+        Args:
+            layer_detectors: dict mapping layer_idx -> SubspaceDetector
+        """
+        self.detectors = layer_detectors
+        self.layers = sorted(layer_detectors.keys())
+        self.combiner = None
+        self.threshold = 0.5
+
+    def _get_features(self, activations_per_layer: dict) -> np.ndarray:
+        """Get score features from each layer detector."""
+        features = []
+        for layer in self.layers:
+            scores = self.detectors[layer].score(activations_per_layer[layer])
+            features.append(scores.reshape(-1, 1))
+        return np.hstack(features)  # [N, n_layers]
+
+    def fit_combiner(self, calibration_data: dict, fpr_target: float = 0.02):
+        """
+        Train a logistic regression combiner on calibration data.
+
+        Args:
+            calibration_data: dict with 'benign' and 'harmful' keys,
+                each mapping to dict of layer_idx -> activations
+            fpr_target: target combined FPR
+        """
+        from sklearn.linear_model import LogisticRegression
+
+        benign_features = self._get_features(calibration_data["benign"])
+        harmful_features = self._get_features(calibration_data["harmful"])
+
+        X = np.vstack([benign_features, harmful_features])
+        y = np.concatenate([
+            np.zeros(len(benign_features)),
+            np.ones(len(harmful_features)),
+        ])
+
+        self.combiner = LogisticRegression(
+            class_weight="balanced", max_iter=1000, random_state=42
+        )
+        self.combiner.fit(X, y)
+
+        # Tune threshold on benign calibration data for target FPR
+        benign_probs = self.combiner.predict_proba(benign_features)[:, 1]
+        self.threshold = float(np.percentile(benign_probs, (1 - fpr_target) * 100))
+
+        actual_fpr = (benign_probs >= self.threshold).mean()
+        print(f"  Multi-layer combiner:")
+        print(f"    Layers: {self.layers}")
+        print(f"    Threshold: {self.threshold:.4f}")
+        print(f"    Calibration FPR: {actual_fpr:.4f}")
+        print(f"    Layer weights: {dict(zip(self.layers, self.combiner.coef_[0]))}")
+
+    def predict_proba(self, activations_per_layer: dict) -> np.ndarray:
+        """Returns jailbreak probability for each sample."""
+        features = self._get_features(activations_per_layer)
+        return self.combiner.predict_proba(features)[:, 1]
+
+    def predict(self, activations_per_layer: dict) -> np.ndarray:
+        """Returns True for detected jailbreaks."""
+        probs = self.predict_proba(activations_per_layer)
+        return probs >= self.threshold
+
+
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Section 2: Threshold Tuning                                             ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
@@ -333,8 +409,8 @@ def run_detector(
     print(f"  Test benign:        {len(eval_data['test_benign'])}")
     print(f"  Harmful:            {len(eval_data['harmful'])}")
 
-    # Compute and save benign centroid for delta-space detection
-    all_benign = np.concatenate([eval_data["calibration_benign"], eval_data["test_benign"]])
+    # Compute benign centroid from calibration data ONLY (no test data — avoids leakage)
+    all_benign = eval_data["calibration_benign"]
     benign_centroid = all_benign.mean(axis=0)
     detector.benign_centroid = benign_centroid
 
@@ -499,6 +575,37 @@ Examples:
                 ours = r["results"]["ours"]
                 print(f"  {layer_idx:<8} {ours['tpr']:>6.3f} {ours['fpr']:>6.3f} "
                       f"{ours['auc']:>6.3f} {ours['f1']:>6.3f}")
+
+            # Multi-layer ensemble with learned combiner
+            if len(all_results) >= 2:
+                print(f"\n  --- Multi-Layer Ensemble Detector ---")
+                try:
+                    layer_detectors = {}
+                    calibration_data = {"benign": {}, "harmful": {}}
+                    test_data = {"benign": {}, "harmful": {}}
+
+                    for layer_idx in all_results:
+                        det = SubspaceDetector.from_artifacts(layer_idx)
+                        eval_data = load_activations_for_eval(layer_idx)
+                        # Fix centroid from calibration only
+                        det.benign_centroid = eval_data["calibration_benign"].mean(axis=0)
+                        layer_detectors[layer_idx] = det
+                        calibration_data["benign"][layer_idx] = eval_data["calibration_benign"]
+                        calibration_data["harmful"][layer_idx] = eval_data["harmful"][:len(eval_data["calibration_benign"])]
+                        test_data["benign"][layer_idx] = eval_data["test_benign"]
+                        test_data["harmful"][layer_idx] = eval_data["harmful"]
+
+                    multi_det = MultiLayerDetector(layer_detectors)
+                    multi_det.fit_combiner(calibration_data, fpr_target=args.fpr_target)
+
+                    # Evaluate on test data
+                    test_benign_preds = multi_det.predict(test_data["benign"])
+                    test_harmful_preds = multi_det.predict(test_data["harmful"])
+                    fpr = test_benign_preds.mean()
+                    tpr = test_harmful_preds.mean()
+                    print(f"  Multi-layer TPR: {tpr:.3f}, FPR: {fpr:.3f}")
+                except Exception as e:
+                    print(f"  [SKIP] Multi-layer ensemble failed: {e}")
     else:
         run_detector(
             int(args.layer), args.fpr_target,

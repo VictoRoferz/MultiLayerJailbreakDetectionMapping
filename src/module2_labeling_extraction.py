@@ -302,25 +302,35 @@ def main():
     model.to(device)
     model.eval()
 
-    # OpenAI client for the judge (lazy import so module loads without it)
+    # OpenAI / Azure OpenAI client for the judge (lazy import so module loads without it)
     client = None
     non_benign_count = sum(1 for c in categories if c != "benign")
     if non_benign_count > 0:
         try:
             import openai  # noqa: F401
-            from openai import OpenAI
+            from openai import OpenAI, AzureOpenAI
         except ImportError:
             raise ImportError(
                 "openai package required for GPT-4 judge. "
                 "Install with: pip install openai"
             )
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise EnvironmentError(
-                "OPENAI_API_KEY not set — required for GPT-4 judge. "
-                f"({non_benign_count} non-benign prompts need judging.)"
+        azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        if azure_key and azure_endpoint:
+            client = AzureOpenAI(
+                api_key=azure_key,
+                azure_endpoint=azure_endpoint,
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
             )
-        client = OpenAI(api_key=api_key)
+        else:
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise EnvironmentError(
+                    "No judge credentials set. Provide either "
+                    "AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT, or OPENAI_API_KEY. "
+                    f"({non_benign_count} non-benign prompts need judging.)"
+                )
+            client = OpenAI(api_key=api_key)
 
     # Checkpoint path + resume
     ck_path = Path(args.output_dir) / "labeled_data" / "checkpoint.pt"

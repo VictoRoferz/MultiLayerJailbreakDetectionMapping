@@ -20,7 +20,7 @@ import argparse
 import os
 import random
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from datasets import load_dataset
@@ -40,6 +40,8 @@ BENIGN_DATASET = {
 HARMFUL_REQUEST_DATASETS = [
     {"name": "walledai/AdvBench", "config": None, "split": "train", "field": "prompt"},
     {"name": "walledai/HarmBench", "config": "standard", "split": "train", "field": "prompt"},
+    {"name": "JailbreakBench/JBB-Behaviors", "config": "behaviors", "split": "harmful", "field": "Goal"},
+    {"name": "walledai/SaladBench", "config": "prompts", "split": "base", "field": "prompt"},
 ]
 
 JAILBREAK_TEMPLATE_DATASET = {
@@ -88,7 +90,7 @@ def fill_template(template: str, request: str) -> str:
 # Collectors
 # ------------------------------------------------------------
 
-def collect_benign(n: int, min_tokens: int = 64, max_tokens: int = 256) -> List[str]:
+def collect_benign(n: int, min_tokens: int = 64, max_tokens: int = 512) -> List[str]:
     """Collect benign passages from WikiText-103, filtered by token length."""
     ds = load_dataset(
         BENIGN_DATASET["name"],
@@ -128,15 +130,26 @@ def collect_harmful_direct() -> List[str]:
 
 def collect_jailbreak_wrapped(
     harmful_requests: List[str],
-    n_target: int = 7000,
+    n_target: int = 5000,
+    max_per_template: int = 20,
+    min_tokens: int = 64,
+    max_tokens: int = 1500,
     seed: int = 42,
 ) -> List[Tuple[str, str, str]]:
     """Collect TrustAIRLab templates and combine with harmful requests.
 
     Strategy:
       - Standalone templates (no placeholder)  : use as-is, attack is embedded.
-      - Placeholder templates                  : fill with random harmful requests
-                                                 until n_target is reached.
+      - Placeholder templates                  : fill with harmful requests
+                                                 up to max_per_template uses per
+                                                 template. Templates are cycled
+                                                 uniformly so diversity is
+                                                 maximized before any single
+                                                 template is reused.
+
+    Templates are length-filtered to [min_tokens, max_tokens] using the Gemma
+    tokenizer to reduce length asymmetry across categories (benign 64-512,
+    harmful_direct ~10-40, wrapped now ~64-1500 instead of unbounded).
 
     Returns a list of tuples: (final_prompt, template_snippet, request_used).
     """
@@ -157,29 +170,57 @@ def collect_jailbreak_wrapped(
     ]
     templates = list(dict.fromkeys(templates))  # dedupe
 
+    tok = AutoTokenizer.from_pretrained(MODEL_NAME_FOR_TOKENIZER)
+    n_before_len_filter = len(templates)
+    templates = [
+        t for t in templates
+        if min_tokens <= len(tok(t, add_special_tokens=False)["input_ids"]) <= max_tokens
+    ]
+    print(f"    + Length filter [{min_tokens}, {max_tokens}] tokens: "
+          f"{n_before_len_filter} -> {len(templates)} templates")
+
     standalone = [t for t in templates if _find_placeholder(t) is None]
     placeholder = [t for t in templates if _find_placeholder(t) is not None]
 
     print(f"    + Standalone templates (use as-is):      {len(standalone)}")
     print(f"    + Placeholder templates (fill w/ harm):  {len(placeholder)}")
+    print(f"    + max_per_template cap:                  {max_per_template}")
 
     rng = random.Random(seed)
     out: List[Tuple[str, str, str]] = []
 
-    # (1) Every standalone template contributes one prompt
+    # (1) Every standalone template contributes one prompt.
     for t in standalone:
         snip = t[:80] + ("..." if len(t) > 80 else "")
         out.append((t, snip, "<embedded>"))
 
-    # (2) Fill placeholder templates up to the target budget
-    remaining = n_target - len(out)
+    # (2) Fill placeholder templates in round-robin order.
+    # Each template is used at most `max_per_template` times before we give up.
+    template_cap = max_per_template * len(placeholder) + len(standalone)
+    remaining = min(n_target, template_cap) - len(out)
     if remaining > 0 and placeholder and harmful_requests:
-        for _ in range(remaining):
-            t = rng.choice(placeholder)
+        use_counts: Dict[str, int] = {t: 0 for t in placeholder}
+        pool = list(placeholder)
+        rng.shuffle(pool)
+        cursor = 0
+        skipped = 0
+        while remaining > 0 and pool:
+            t = pool[cursor % len(pool)]
+            if use_counts[t] >= max_per_template:
+                pool.pop(cursor % len(pool))
+                if not pool:
+                    break
+                continue
             r = rng.choice(harmful_requests)
             final = fill_template(t, r)
             snip = t[:80] + ("..." if len(t) > 80 else "")
             out.append((final, snip, r))
+            use_counts[t] += 1
+            remaining -= 1
+            cursor += 1
+        if remaining > 0:
+            print(f"    ! template cap reached with {remaining} slots unfilled "
+                  f"(would need more unique placeholder templates).")
 
     return out
 
@@ -194,8 +235,18 @@ def main():
     )
     parser.add_argument("--n-benign", type=int, default=4000,
                         help="Number of benign WikiText passages.")
-    parser.add_argument("--n-jailbreak-wrapped", type=int, default=7000,
+    parser.add_argument("--n-harmful-direct", type=int, default=2000,
+                        help="Cap on harmful_direct prompts (shuffled-then-truncated). "
+                             "Pool is also used to fill placeholder jailbreak templates, "
+                             "so only a few thousand are needed.")
+    parser.add_argument("--n-jailbreak-wrapped", type=int, default=5000,
                         help="Target total for jailbreak_wrapped category.")
+    parser.add_argument("--max-per-template", type=int, default=20,
+                        help="Cap on number of times a single jailbreak template is reused.")
+    parser.add_argument("--benign-min-tokens", type=int, default=64)
+    parser.add_argument("--benign-max-tokens", type=int, default=512)
+    parser.add_argument("--wrapped-min-tokens", type=int, default=64)
+    parser.add_argument("--wrapped-max-tokens", type=int, default=1500)
     parser.add_argument("--output", type=str, default="artifacts/prompts/prompt_pool.pt")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -207,17 +258,33 @@ def main():
     if not os.getenv("HF_TOKEN"):
         print("[!] HF_TOKEN not set — some gated datasets may fail.")
 
-    print(f"\n[1/3] Benign passages (WikiText-103), target={args.n_benign}")
-    benign = collect_benign(args.n_benign)
+    print(f"\n[1/3] Benign passages (WikiText-103), target={args.n_benign}, "
+          f"tokens=[{args.benign_min_tokens}, {args.benign_max_tokens}]")
+    benign = collect_benign(
+        args.n_benign,
+        min_tokens=args.benign_min_tokens,
+        max_tokens=args.benign_max_tokens,
+    )
     print(f"    * Collected {len(benign)} benign passages")
 
-    print("\n[2/3] Direct harmful requests (AdvBench + HarmBench)")
+    print("\n[2/3] Direct harmful requests (AdvBench + HarmBench + JBB + Salad)")
     harmful = collect_harmful_direct()
     print(f"    * Collected {len(harmful)} harmful requests (deduplicated)")
+    if len(harmful) > args.n_harmful_direct:
+        rng_h = random.Random(args.seed)
+        rng_h.shuffle(harmful)
+        harmful = harmful[:args.n_harmful_direct]
+        print(f"    * Capped to {len(harmful)} (shuffled, seed={args.seed})")
 
-    print(f"\n[3/3] Jailbreak templates (TrustAIRLab), target={args.n_jailbreak_wrapped}")
+    print(f"\n[3/3] Jailbreak templates (TrustAIRLab), target={args.n_jailbreak_wrapped}, "
+          f"tokens=[{args.wrapped_min_tokens}, {args.wrapped_max_tokens}]")
     jb_wrapped = collect_jailbreak_wrapped(
-        harmful, n_target=args.n_jailbreak_wrapped, seed=args.seed,
+        harmful,
+        n_target=args.n_jailbreak_wrapped,
+        max_per_template=args.max_per_template,
+        min_tokens=args.wrapped_min_tokens,
+        max_tokens=args.wrapped_max_tokens,
+        seed=args.seed,
     )
     print(f"    * Built {len(jb_wrapped)} wrapped prompts")
 
@@ -233,13 +300,31 @@ def main():
 
     for p in harmful:
         prompts.append(p)
-        sources.append("advbench+harmbench")
+        sources.append("advbench+harmbench+jbb+salad")
         categories.append("harmful_direct")
 
     for final, _snip, _req in jb_wrapped:
         prompts.append(final)
         sources.append("trustairlab")
         categories.append("jailbreak_wrapped")
+
+    # Full-text dedupe (whitespace + case normalized). Prefix dedupe killed
+    # all fills of a template because they share the same opening prose, so
+    # we only drop exact duplicates here.
+    seen: set = set()
+    kept_idx: List[int] = []
+    for i, p in enumerate(prompts):
+        key = " ".join(p.split()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        kept_idx.append(i)
+    n_before = len(prompts)
+    prompts = [prompts[i] for i in kept_idx]
+    sources = [sources[i] for i in kept_idx]
+    categories = [categories[i] for i in kept_idx]
+    print(f"\n[dedupe] removed {n_before - len(prompts)} exact duplicates; "
+          f"{len(prompts)} remaining.")
 
     # Shuffle so downstream cap / splits are class-balanced
     rng = random.Random(args.seed)

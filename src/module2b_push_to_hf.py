@@ -51,29 +51,18 @@ def build_hf_dataset(source_dir: Path):
     n = len(raw["labels"])
     print(f"[-] Loaded {n} rows from full_dataset.pt")
 
-    # Reproduce the split assignment (must match split_and_save in Module 2)
-    # by reading split indices that Module 2 wrote into the per-layer files.
-    split_idx: Dict[str, List[int]] = {}
-    ref_layer = LAYERS[0]
-    for name in ("train", "val", "test"):
-        ck = torch.load(
-            source_dir / f"layer_{ref_layer}" / f"{name}_activations.pt",
-            weights_only=False,
-        )
-        split_idx[name] = list(range(len(ck["labels"])))
-        # Note: here we rely on the order matching `split_and_save`'s output.
-    # Because the per-layer files are already in split order, re-derive the
-    # mapping from full_dataset.pt by splitting with the same seed.
-    # Simpler and more robust: reassemble splits from the full dataset with
-    # the SAME seed used in Module 2 (42 default).
+    # Reassemble splits from the full dataset with the SAME seed used in
+    # Module 2 (42 default). Keys match HuggingFace's expected split names.
     rng = np.random.default_rng(42)
     all_idx = np.arange(n)
     rng.shuffle(all_idx)
     n_train = int(0.7 * n)
     n_val = int(0.1 * n)
-    split_idx["train"] = all_idx[:n_train].tolist()
-    split_idx["validation"] = all_idx[n_train:n_train + n_val].tolist()
-    split_idx["test"] = all_idx[n_train + n_val:].tolist()
+    split_idx: Dict[str, List[int]] = {
+        "train": all_idx[:n_train].tolist(),
+        "validation": all_idx[n_train:n_train + n_val].tolist(),
+        "test": all_idx[n_train + n_val:].tolist(),
+    }
 
     def build_split(indices: List[int]) -> Dataset:
         rows = {

@@ -1,0 +1,38 @@
+{
+  "model": "google/gemma-2-2b-it",
+  "layers": [
+    5,
+    10,
+    15,
+    20,
+    25
+  ],
+  "pool_k": 5,
+  "max_prompt_tokens": 2048,
+  "max_new_tokens": 200,
+  "judge_model": "gpt-4o-mini",
+  "seed": 42,
+  "n_total": 6132,
+  "counts_by_category": {
+    "harmful_direct": 704,
+    "jailbreak_gcg_universal": 704,
+    "jailbreak_artprompt": 704,
+    "jailbreak_gcg_individual": 20,
+    "benign": 4000
+  },
+  "label_counts": {
+    "label_0": 5554,
+    "label_1": 578,
+    "label_unjudged": 0
+  },
+  "truncation": {
+    "n_truncated": 0,
+    "rate": 0.0
+  },
+  "split_sizes": {
+    "train": 4292,
+    "val": 613,
+    "test": 1227
+  },
+  "elapsed_sec": 37525.8721075058
+}

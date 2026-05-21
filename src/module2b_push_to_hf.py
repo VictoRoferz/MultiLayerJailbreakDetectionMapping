@@ -37,7 +37,7 @@ import torch
 LAYERS = [5, 10, 15, 20, 25]
 
 
-def build_hf_dataset(source_dir: Path):
+def build_hf_dataset(source_dir: Path, layers: List[int]):
     """Load full_dataset.pt + per-layer splits and build a HuggingFace DatasetDict."""
     from datasets import Dataset, DatasetDict, Features, Sequence, Value
 
@@ -50,6 +50,15 @@ def build_hf_dataset(source_dir: Path):
 
     n = len(raw["labels"])
     print(f"[-] Loaded {n} rows from full_dataset.pt")
+
+    # Sanity-check: requested layers must be present in the dict.
+    missing = [L for L in layers if L not in raw["activations"]]
+    if missing:
+        available = sorted(raw["activations"].keys())
+        raise KeyError(
+            f"Layers {missing} not present in full_dataset.pt. "
+            f"Available: {available}. Pass --layers to match."
+        )
 
     # Reassemble splits from the full dataset with the SAME seed used in
     # Module 2 (42 default). Keys match HuggingFace's expected split names.
@@ -77,12 +86,12 @@ def build_hf_dataset(source_dir: Path):
             ],
             "label": [int(raw["labels"][i]) for i in indices],
         }
-        for L in LAYERS:
+        for L in layers:
             rows[f"activation_layer_{L}"] = [
                 raw["activations"][L][i].tolist() for i in indices
             ]
         # Let datasets infer judge_score schema; pin activation shape.
-        d_hidden = raw["activations"][LAYERS[0]][0].shape[0]
+        d_hidden = raw["activations"][layers[0]][0].shape[0]
         features = Features({
             "prompt": Value("string"),
             "response": Value("string"),
@@ -92,14 +101,15 @@ def build_hf_dataset(source_dir: Path):
             "label": Value("int32"),
             **{
                 f"activation_layer_{L}": Sequence(Value("float32"), length=d_hidden)
-                for L in LAYERS
+                for L in layers
             },
         })
         # datasets struggles with empty-dict Features spec; skip explicit features
         # for judge_score so it auto-infers the struct.
         return Dataset.from_dict(rows)
 
-    print("[-] Building train / validation / test splits...")
+    print(f"[-] Building train / validation / test splits "
+          f"(layers={layers}, hidden_dim={raw['activations'][layers[0]][0].shape[0]})...")
     dd = DatasetDict({
         name: build_split(idx) for name, idx in split_idx.items()
     })
@@ -116,6 +126,11 @@ def main():
                         help="HuggingFace repo, e.g. username/dataset-name")
     parser.add_argument("--source-dir", type=str, default="artifacts",
                         help="Directory containing labeled_data/ and layer_*/")
+    parser.add_argument(
+        "--layers", type=int, nargs="+", default=LAYERS,
+        help=f"Layers to publish (space-separated). Default: {LAYERS} "
+             f"(Gemma). For Vicuna-7B use e.g. 4 10 15 20 25 30.",
+    )
     parser.add_argument("--private", action="store_true", default=True,
                         help="Upload as a private dataset (default: True)")
     parser.add_argument("--public", action="store_true",
@@ -136,9 +151,10 @@ def main():
     print("=" * 60)
     print(f"    Source:   {source_dir}")
     print(f"    Target:   {args.repo_id}  ({'private' if private else 'public'})")
+    print(f"    Layers:   {list(args.layers)}")
     print("=" * 60)
 
-    dd = build_hf_dataset(source_dir)
+    dd = build_hf_dataset(source_dir, layers=list(args.layers))
 
     # Attach metadata if present
     meta_path = source_dir / "metadata.json"

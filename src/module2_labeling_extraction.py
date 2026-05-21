@@ -293,11 +293,29 @@ def split_and_save(
 # ------------------------------------------------------------
 
 def main():
+    # Declared global up-front because we mutate these module-level constants
+    # below (after parsing args). The declaration must precede any reference
+    # to the names in this function — including argparse defaults that read
+    # LAYERS / MODEL_NAME.
+    global LAYERS, MODEL_NAME
+
     parser = argparse.ArgumentParser(
-        description="Run Gemma on prompts, judge, extract multi-layer activations."
+        description="Run the target model on prompts, judge each response, "
+                    "and extract multi-layer activations."
     )
     parser.add_argument("--prompt-pool", type=str, default="artifacts/prompts/prompt_pool.pt")
     parser.add_argument("--output-dir", type=str, default="artifacts")
+    parser.add_argument(
+        "--model", type=str, default=MODEL_NAME,
+        help=f"Target model HuggingFace id. Default: {MODEL_NAME!r}. "
+             f"Examples: google/gemma-2-2b-it, lmsys/vicuna-7b-v1.3.",
+    )
+    parser.add_argument(
+        "--layers", type=int, nargs="+", default=list(LAYERS),
+        help=f"Residual-stream layers to probe (space-separated). "
+             f"Default for Gemma: {list(LAYERS)}. "
+             f"For Vicuna-7B use e.g. 4 10 15 20 25 30.",
+    )
     parser.add_argument("--max-prompts", type=int, default=None,
                         help="Cap on number of prompts to process (for dev / smoke tests).")
     parser.add_argument("--max-new-tokens", type=int, default=200)
@@ -309,8 +327,17 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    # Resolve runtime model + layer choice. Module-level constants (LAYERS,
+    # MODEL_NAME) are mutated so the rest of the file's globals-style accesses
+    # pick up the user's choice without threading them through every function.
+    # (The `global` declaration is at the top of main().)
+    LAYERS = list(args.layers)
+    MODEL_NAME = args.model
+
     print("=" * 60)
     print("MODULE 2 — LABELING + ACTIVATION EXTRACTION")
+    print(f"  Model:  {MODEL_NAME}")
+    print(f"  Layers: {LAYERS}")
     print("=" * 60)
 
     # Load prompt pool
@@ -323,6 +350,21 @@ def main():
     prompts = pool["prompts"]
     sources = pool["sources"]
     categories = pool["categories"]
+
+    # Sanity check: if the prompt pool was tagged with a target/layers,
+    # warn when the user-supplied CLI args disagree.
+    pool_target = pool.get("target")
+    pool_model = pool.get("model_name")
+    pool_layers = pool.get("layers")
+    if pool_model and pool_model != MODEL_NAME:
+        print(f"[!] Pool was built for {pool_model!r} but --model is "
+              f"{MODEL_NAME!r}. Activations will be model-specific; verify "
+              f"this is intentional.")
+    if pool_layers and list(pool_layers) != LAYERS:
+        print(f"[!] Pool advertises layers {list(pool_layers)} but --layers "
+              f"is {LAYERS}. Continuing with --layers.")
+    if pool_target:
+        print(f"[-] Pool target: {pool_target}")
 
     if args.max_prompts:
         prompts = prompts[:args.max_prompts]

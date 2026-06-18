@@ -120,7 +120,8 @@ def load_full_with_categories(layer_idx: int) -> dict:
     Load activations + categories + labels from labeled_data/full_dataset.pt.
 
     Splits the data into three classes:
-      benign           : category == 'benign'   (auto-label 0, WikiText)
+      benign           : category == 'benign'   (auto-label 0; WikiText for
+                         v1, Alpaca for v2)
       refused          : category != 'benign' AND label == 0
                          (harmful_direct or jailbreak_wrapped where Gemma refused
                           or produced no substantive harm — judge returned 0)
@@ -394,9 +395,10 @@ def analysis_raw_activation_space(layer_idx: int, save_plots: bool = True) -> di
 def analysis_three_class_pca(layer_idx: int, save_plots: bool = True) -> dict:
     """
     PCA-2D scatter that separates the binary 'harmful' class into:
-      blue   — benign (WikiText, auto-label 0)
-      orange — harmful prompt that did NOT jailbreak Gemma
-               (category in {harmful_direct, jailbreak_wrapped} AND label 0)
+      blue   — benign (category == 'benign', auto-label 0; source depends on
+               the build — WikiText for v1, Alpaca for v2)
+      orange — harmful prompt that did NOT jailbreak the model
+               (category != 'benign' AND label 0)
       red    — jailbroken (label 1, judge-confirmed substantive harm)
 
     Reads from labeled_data/full_dataset.pt because the per-split tensors only
@@ -412,7 +414,7 @@ def analysis_three_class_pca(layer_idx: int, save_plots: bool = True) -> dict:
     jailbroken = data["jailbroken"].numpy()
     all_acts = data["all"].numpy()
 
-    print(f"  Benign (WikiText):                    {len(benign)}")
+    print(f"  Benign:                               {len(benign)}")
     print(f"  Harmful prompt, no jailbreak:         {len(refused)}")
     print(f"  Jailbroken (label=1):                 {len(jailbroken)}")
 
@@ -431,7 +433,7 @@ def analysis_three_class_pca(layer_idx: int, save_plots: bool = True) -> dict:
         if len(benign_2d):
             ax.scatter(benign_2d[:, 0], benign_2d[:, 1],
                        c="steelblue", alpha=0.4, s=14,
-                       label=f"Benign — WikiText (n={len(benign_2d)})")
+                       label=f"Benign (n={len(benign_2d)})")
         if len(refused_2d):
             ax.scatter(refused_2d[:, 0], refused_2d[:, 1],
                        c="darkorange", alpha=0.5, s=18,
@@ -458,6 +460,119 @@ def analysis_three_class_pca(layer_idx: int, save_plots: bool = True) -> dict:
         "n_jailbroken": int(len(jailbroken)),
         "explained_variance_pc1": float(var_pc1),
         "explained_variance_pc2": float(var_pc2),
+    }
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Section 2c: Per-Attack PCA — color by (category, label)                 ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+# Editable color palette. Keyed by (category, label). Edit these hex/named
+# colors to recolor the scatter. `label` 0 = refused/benign, 1 = jailbroken.
+# Any (category, label) combination not listed falls back to gray.
+PER_ATTACK_COLORS = {
+    ("benign",                   0): ("#4C72B0", "Benign"),
+    ("harmful_direct",           0): ("#9EC9E2", "Harmful direct — refused"),
+    ("harmful_direct",           1): ("#C44E52", "Harmful direct — jailbroken"),
+    ("jailbreak_artprompt",      0): ("#F2C28B", "ArtPrompt — refused"),
+    ("jailbreak_artprompt",      1): ("#DD8452", "ArtPrompt — jailbroken"),
+    ("jailbreak_gcg_universal",  0): ("#A1D99B", "GCG-Universal — refused"),
+    ("jailbreak_gcg_universal",  1): ("#2CA02C", "GCG-Universal — jailbroken"),
+    ("jailbreak_gcg_individual", 0): ("#CBB7DD", "GCG-Individual — refused"),
+    ("jailbreak_gcg_individual", 1): ("#9467BD", "GCG-Individual — jailbroken"),
+    # v1 categories (kept so the same script works on the Gemma/wrapped data)
+    ("jailbreak_wrapped",        0): ("#F7B6D2", "Wrapped — refused"),
+    ("jailbreak_wrapped",        1): ("#E377C2", "Wrapped — jailbroken"),
+}
+_PER_ATTACK_FALLBACK = ("#999999", "other")
+
+
+def analysis_per_attack_pca(layer_idx: int, save_plots: bool = True,
+                            jailbroken_only: bool = False) -> dict:
+    """
+    PCA-2D scatter colored by (category, label) — one color per attack family
+    and outcome. Also reports the per-attack jailbreak success rate
+    (label==1 fraction within each non-benign category).
+
+    Args:
+        jailbroken_only: if True, only plot label==1 points (compare where
+            successful jailbreaks from each attack land, ignoring refusals).
+
+    Colors are taken from PER_ATTACK_COLORS (editable at module level).
+
+    Returns dict with per-category counts + success rates + PCA variance.
+    """
+    print(f"\n{'='*60}")
+    print(f"  Per-Attack PCA — Layer {layer_idx}"
+          f"{' (jailbroken only)' if jailbroken_only else ''}")
+    print(f"{'='*60}")
+
+    data = load_full_with_categories(layer_idx)
+    all_acts = data["all"].numpy()
+    labels = data["labels"].tolist()
+    categories = list(data["categories"])
+
+    # Fit PCA jointly on all activations so every class shares the same axes.
+    pca = PCA(n_components=2)
+    proj = pca.fit_transform(all_acts)
+    var_pc1 = pca.explained_variance_ratio_[0]
+    var_pc2 = pca.explained_variance_ratio_[1]
+
+    # ── Per-attack success-rate report ────────────────────────────────────
+    from collections import Counter
+    cat_total = Counter(categories)
+    cat_jb = Counter(c for c, l in zip(categories, labels) if l == 1)
+    print("\n  Per-attack jailbreak success rate:")
+    success_rates = {}
+    for cat in sorted(cat_total):
+        if cat == "benign":
+            continue
+        total = cat_total[cat]
+        jb = cat_jb.get(cat, 0)
+        rate = jb / total if total else 0.0
+        success_rates[cat] = {"total": total, "jailbroken": jb, "rate": rate}
+        print(f"    {cat:<28s}: {jb:>4d}/{total:<4d} = {rate*100:5.1f}%")
+
+    # ── Plot ───────────────────────────────────────────────────────────────
+    if save_plots and HAS_PLOTTING:
+        fig_dir = ensure_figures_dir(layer_idx)
+        fig, ax = plt.subplots(figsize=(11, 8))
+
+        # Plot each (category, label) bucket as its own colored series.
+        buckets = sorted(set(zip(categories, labels)),
+                         key=lambda cl: (cl[0], cl[1]))
+        for (cat, lab) in buckets:
+            if jailbroken_only and lab != 1:
+                continue
+            color, name = PER_ATTACK_COLORS.get((cat, lab), _PER_ATTACK_FALLBACK)
+            mask = [c == cat and l == lab for c, l in zip(categories, labels)]
+            pts = proj[mask]
+            if len(pts) == 0:
+                continue
+            ax.scatter(pts[:, 0], pts[:, 1], c=color, s=14, alpha=0.45,
+                       label=f"{name} (n={len(pts)})")
+
+        ax.set_xlabel(f"PC1 ({var_pc1*100:.1f}% var)")
+        ax.set_ylabel(f"PC2 ({var_pc2*100:.1f}% var)")
+        title = f"Per-Attack PCA — Layer {layer_idx}"
+        if jailbroken_only:
+            title += " (jailbroken only)"
+        ax.set_title(title)
+        ax.legend(fontsize=8, loc="best", framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        fname = ("per_attack_pca_jailbroken.png" if jailbroken_only
+                 else "per_attack_pca.png")
+        out_path = fig_dir / fname
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"\n  Saved figure: {out_path}")
+
+    return {
+        "layer": layer_idx,
+        "explained_variance_pc1": float(var_pc1),
+        "explained_variance_pc2": float(var_pc2),
+        "success_rates": success_rates,
     }
 
 
@@ -834,12 +949,12 @@ def save_results(results: dict, layer_idx: int, filename: str = "pca_results.jso
 # ║  Section 6: Main + CLI                                                   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-ANALYSIS_CHOICES = ["all", "raw", "three-class", "perturbation", "cross-layer"]
+ANALYSIS_CHOICES = ["all", "raw", "three-class", "per-attack", "perturbation", "cross-layer"]
 
 
 def main(args):
     """Dispatch to requested analyses."""
-    analyses = [args.analysis] if args.analysis != "all" else ["raw", "three-class", "perturbation", "cross-layer"]
+    analyses = [args.analysis] if args.analysis != "all" else ["raw", "three-class", "per-attack", "perturbation", "cross-layer"]
     save_plots = not args.no_plots
     all_results = {}
 
@@ -868,6 +983,19 @@ def main(args):
                 results = analysis_three_class_pca(args.layer_idx, save_plots=save_plots)
                 all_results["three_class"] = results
                 save_results(results, args.layer_idx, filename="three_class_pca.json")
+
+        elif analysis == "per-attack":
+            layers_to_run = DEFAULT_LAYERS if args.layer_idx == "all" else [args.layer_idx]
+            for layer in layers_to_run:
+                try:
+                    results = analysis_per_attack_pca(
+                        layer, save_plots=save_plots,
+                        jailbroken_only=args.jailbroken_only,
+                    )
+                    all_results[f"per_attack_layer_{layer}"] = results
+                    save_results(results, layer, filename="per_attack_pca.json")
+                except (FileNotFoundError, KeyError, RuntimeError) as e:
+                    print(f"  [SKIP] Layer {layer}: {e}")
 
         elif analysis == "perturbation":
             if args.layer_idx == "all":
@@ -942,6 +1070,10 @@ Examples:
                         help="Number of perturbation samples to generate")
     parser.add_argument("--no-plots", action="store_true",
                         help="Disable plot generation (print metrics only)")
+    parser.add_argument("--jailbroken-only", action="store_true",
+                        help="For --analysis per-attack: only plot label==1 "
+                             "points (compare where successful jailbreaks from "
+                             "each attack family land).")
 
     args = parser.parse_args()
 

@@ -1,0 +1,66 @@
+Boundary Point Jailbreaking of Black-Box LLMs
+ings suggest that AI security may benefit from adopting stan-
+dard cybersecurity practices: layered analytical approaches
+operating in real-time and post-hoc, combining multiple
+telemetry sources, mixing heuristics with behavioural anal-
+ysis, and accepting that individual interactions may fail
+while designing the overall system to remain sufficiently
+robust (David C, 2025).10
+Limitations.BPJ attacks incur a large number of classifier
+flags, which would result in bans for a range of systems
+under realistic conditions. Furthermore, we do not apply
+BPJ to jailbreaking the main model (instead relying on a
+human-found jailbreak), and we do not consider settings
+with highly stochastic classifiers.
+Broader Implications.As higher levels of robustness
+are desired, defenders will need to consider increasingly
+complex attacks such as BPJ. A range of open questions
+remain, including developing defences to BPJ and exploring
+formally and empirically why BPJ attacks learned on a
+single attack readily transfer to other queries.
+Acknowledgements
+We thank Abby D’Cruz for providing thoughtful comments
+and figure designs. We thank Zihan Wang for replicating
+our work and exploring defences discussed in Section E. We
+thank Hen Davidov, Yoav Gelberg, and Yonatan Gideoni for
+useful discussions and feedback on the paper. We thank Jai
+Patel, James Burn, and Nate Burnikell for support through-
+out the project. The authors would also acknowledge sup-
+port from His Majesty’s Government in the development of
+this research.
+Impact Statement
+This work presents a new class of attacks that succeed
+against state-of-the-art deployed AI safeguards and can be
+used to elicit harmful information. We acknowledge the
+dual-use nature of this research and have taken several steps
+to mitigate potential harms.
+Responsible Disclosure.We disclosed these findings to
+AI companies we performed testing on at least six weeks
+prior to publication. Both companies have replicated the at-
+tack in partnership with UK AISI and have active mitigation
+efforts.
+Mitigations.We have abstracted significant algorithmic
+details and do not release attack strings or code. Reproduc-
+ing successful attacks against real-world systems would re-
+10We thank Dr Kate S for sharing thoughts on the implications
+of BPJ.
+quire substantial additional research and development effort
+to compensate for details we have withheld. We verified that
+substantial additional research and development is required
+by observing experienced research engineers attempting to
+implement the algorithm from the public paper.
+Release Rationale.We believe publication is net positive
+for several reasons. First, BPJ is not a one-off vulnerability
+that can be patched; it exploits fundamental properties of
+classifier-based defences. Defenders across a wide range
+of AI deployment contexts beyond just jailbreaking should
+be aware of this attack class. Second, the core algorith-
+mic insight (curriculum learning with active selection of
+high-signal evaluation points) is sufficiently natural that
+sophisticated attackers are likely already exploring similar
+approaches. Third, our central finding that effective defence
+requires batch-level monitoring rather than single interaction
+methods alone points toward concrete defensive improve-
+ments. We believe spreading defender awareness of this
+need outweighs the marginal risk of informing attackers.
+9

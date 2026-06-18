@@ -1,0 +1,8 @@
+{
+  "layer": 15,
+  "n_benign": 4000,
+  "n_refused_harmful": 1342,
+  "n_jailbroken": 823,
+  "explained_variance_pc1": 0.10679949820041656,
+  "explained_variance_pc2": 0.04550290107727051
+}

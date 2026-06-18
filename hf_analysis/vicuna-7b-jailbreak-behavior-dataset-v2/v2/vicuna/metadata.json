@@ -1,0 +1,39 @@
+{
+  "model": "lmsys/vicuna-7b-v1.3",
+  "layers": [
+    4,
+    10,
+    15,
+    20,
+    25,
+    30
+  ],
+  "pool_k": 5,
+  "max_prompt_tokens": 2048,
+  "max_new_tokens": 128,
+  "judge_model": "gpt-4o-mini",
+  "seed": 42,
+  "n_total": 6165,
+  "counts_by_category": {
+    "jailbreak_gcg_universal": 715,
+    "harmful_direct": 715,
+    "jailbreak_artprompt": 715,
+    "benign": 4000,
+    "jailbreak_gcg_individual": 20
+  },
+  "label_counts": {
+    "label_0": 5342,
+    "label_1": 823,
+    "label_unjudged": 0
+  },
+  "truncation": {
+    "n_truncated": 0,
+    "rate": 0.0
+  },
+  "split_sizes": {
+    "train": 4315,
+    "val": 616,
+    "test": 1234
+  },
+  "elapsed_sec": 11529.187912225723
+}

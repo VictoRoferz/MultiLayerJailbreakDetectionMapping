@@ -1,0 +1,150 @@
+{
+  "gemma": {
+    "5": {
+      "sil3": 0.097,
+      "sil_jb": 0.064,
+      "d_benign_jb": 0.34,
+      "d_refused_jb": 0.116,
+      "probe_val_auroc": 0.904,
+      "probe_test_auroc": 0.917,
+      "probe_test_acc": 0.9,
+      "n_pc1_outliers": 706,
+      "outlier_categories": {
+        "jailbreak_gcg_universal": 704,
+        "jailbreak_gcg_individual": 2
+      }
+    },
+    "10": {
+      "sil3": 0.111,
+      "sil_jb": 0.078,
+      "d_benign_jb": 0.306,
+      "d_refused_jb": 0.116,
+      "probe_val_auroc": 0.909,
+      "probe_test_auroc": 0.925,
+      "probe_test_acc": 0.91,
+      "n_pc1_outliers": 468,
+      "outlier_categories": {
+        "jailbreak_gcg_universal": 468
+      }
+    },
+    "15": {
+      "sil3": 0.098,
+      "sil_jb": 0.074,
+      "d_benign_jb": 0.271,
+      "d_refused_jb": 0.106,
+      "probe_val_auroc": 0.892,
+      "probe_test_auroc": 0.921,
+      "probe_test_acc": 0.905,
+      "n_pc1_outliers": 0,
+      "outlier_categories": {}
+    },
+    "20": {
+      "sil3": 0.093,
+      "sil_jb": 0.063,
+      "d_benign_jb": 0.244,
+      "d_refused_jb": 0.099,
+      "probe_val_auroc": 0.879,
+      "probe_test_auroc": 0.891,
+      "probe_test_acc": 0.888,
+      "n_pc1_outliers": 0,
+      "outlier_categories": {}
+    },
+    "25": {
+      "sil3": 0.078,
+      "sil_jb": 0.051,
+      "d_benign_jb": 0.34,
+      "d_refused_jb": 0.113,
+      "probe_val_auroc": 0.903,
+      "probe_test_auroc": 0.916,
+      "probe_test_acc": 0.899,
+      "n_pc1_outliers": 46,
+      "outlier_categories": {
+        "benign": 41,
+        "jailbreak_gcg_individual": 5
+      }
+    }
+  },
+  "vicuna": {
+    "4": {
+      "sil3": 0.129,
+      "sil_jb": 0.085,
+      "d_benign_jb": 0.292,
+      "d_refused_jb": 0.248,
+      "probe_val_auroc": 0.932,
+      "probe_test_auroc": 0.938,
+      "probe_test_acc": 0.872,
+      "n_pc1_outliers": 716,
+      "outlier_categories": {
+        "jailbreak_gcg_universal": 715,
+        "jailbreak_gcg_individual": 1
+      }
+    },
+    "10": {
+      "sil3": 0.138,
+      "sil_jb": 0.091,
+      "d_benign_jb": 0.359,
+      "d_refused_jb": 0.271,
+      "probe_val_auroc": 0.933,
+      "probe_test_auroc": 0.943,
+      "probe_test_acc": 0.902,
+      "n_pc1_outliers": 718,
+      "outlier_categories": {
+        "jailbreak_gcg_universal": 715,
+        "jailbreak_gcg_individual": 3
+      }
+    },
+    "15": {
+      "sil3": 0.134,
+      "sil_jb": 0.09,
+      "d_benign_jb": 0.353,
+      "d_refused_jb": 0.249,
+      "probe_val_auroc": 0.932,
+      "probe_test_auroc": 0.933,
+      "probe_test_acc": 0.895,
+      "n_pc1_outliers": 715,
+      "outlier_categories": {
+        "jailbreak_gcg_universal": 715
+      }
+    },
+    "20": {
+      "sil3": 0.129,
+      "sil_jb": 0.092,
+      "d_benign_jb": 0.326,
+      "d_refused_jb": 0.217,
+      "probe_val_auroc": 0.916,
+      "probe_test_auroc": 0.914,
+      "probe_test_acc": 0.883,
+      "n_pc1_outliers": 718,
+      "outlier_categories": {
+        "jailbreak_gcg_universal": 715,
+        "jailbreak_gcg_individual": 3
+      }
+    },
+    "25": {
+      "sil3": 0.134,
+      "sil_jb": 0.104,
+      "d_benign_jb": 0.295,
+      "d_refused_jb": 0.196,
+      "probe_val_auroc": 0.906,
+      "probe_test_auroc": 0.916,
+      "probe_test_acc": 0.883,
+      "n_pc1_outliers": 715,
+      "outlier_categories": {
+        "jailbreak_gcg_universal": 715
+      }
+    },
+    "30": {
+      "sil3": 0.122,
+      "sil_jb": 0.089,
+      "d_benign_jb": 0.283,
+      "d_refused_jb": 0.208,
+      "probe_val_auroc": 0.902,
+      "probe_test_auroc": 0.919,
+      "probe_test_acc": 0.891,
+      "n_pc1_outliers": 715,
+      "outlier_categories": {
+        "jailbreak_gcg_universal": 715
+      }
+    }
+  }
+}

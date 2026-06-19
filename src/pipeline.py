@@ -66,10 +66,12 @@ def run_pipeline(
     max_passages: int = None,
     judge_method: str = "heuristic",
     judge_threshold: float = 7.0,
+    judge_mode: str = "benign-harm",
     api_key: str = None,
     n_pca_dims: int = 50,
     fpr_target: float = 0.02,
     evaluate_baselines: bool = False,
+    detector_source: str = "A",
     force: bool = False,
 ):
     """
@@ -80,9 +82,14 @@ def run_pipeline(
         modules: list of module names to run
         force: if True, re-run even if artifacts exist
     """
+    # Detector source: A = generator deltas via live Gemma (corruption+judge+cluster);
+    # B = real-data jailbreak directions (offline, skips corruption+judge).
+    clustering_source = "data" if detector_source == "B" else "generator"
+
     print(f"\n{'#'*60}")
     print(f"  PIPELINE — Layer {layer_idx}")
-    print(f"  Modules: {', '.join(modules)}")
+    print(f"  Modules: {', '.join(modules)}  |  detector-source: {detector_source} "
+          f"(clustering={clustering_source})")
     print(f"{'#'*60}")
 
     start_time = time.time()
@@ -134,8 +141,8 @@ def run_pipeline(
             except (FileNotFoundError, ValueError) as e:
                 print(f"  [ERROR] Generator training failed: {e}")
 
-    # ── Module 4: Corruption ──────────────────────────────────────────────
-    if "corruption" in modules:
+    # ── Module 4: Corruption (Option A only) ──────────────────────────────
+    if "corruption" in modules and detector_source == "A":
         if not force and check_artifacts(layer_idx, "corruption"):
             print(f"\n  [SKIP] Corruption — artifacts exist")
         else:
@@ -149,17 +156,18 @@ def run_pipeline(
                 max_passages=max_passages,
             )
 
-    # ── Module 5: Judge ───────────────────────────────────────────────────
-    if "judge" in modules:
+    # ── Module 5: Judge (Option A only) ───────────────────────────────────
+    if "judge" in modules and detector_source == "A":
         if not force and check_artifacts(layer_idx, "judge"):
             print(f"\n  [SKIP] Judge — artifacts exist")
         else:
             from module5_judge import run_judge
-            print(f"\n  Running judge...")
+            print(f"\n  Running judge (mode={judge_mode})...")
             run_judge(
                 layer_idx=layer_idx,
                 method=judge_method,
                 threshold=judge_threshold,
+                judge_mode=judge_mode,
                 api_key=api_key,
             )
 
@@ -174,6 +182,7 @@ def run_pipeline(
                 run_clustering(
                     layer_idx=layer_idx,
                     n_pca_dims=n_pca_dims,
+                    source=clustering_source,
                 )
             except (FileNotFoundError, ValueError) as e:
                 print(f"  [ERROR] Clustering failed: {e}")
@@ -282,10 +291,19 @@ Examples:
     parser.add_argument("--epsilon", type=float, default=0.1)
     parser.add_argument("--max-passages", type=int, default=None)
 
+    # Detector source: A = generator deltas via live Gemma; B = real-data (offline)
+    parser.add_argument("--detector-source", type=str, default="A",
+                        choices=["A", "B"],
+                        help="A: generator deltas (corruption->judge->cluster, needs "
+                             "Gemma+GPT-4). B: real v2 jailbreak directions (offline, "
+                             "skips corruption+judge).")
+
     # Module 5: Judge
-    parser.add_argument("--judge-method", type=str, default="heuristic",
+    parser.add_argument("--judge-method", type=str, default="gpt4",
                         choices=["gpt4", "heuristic", "both"])
     parser.add_argument("--judge-threshold", type=float, default=7.0)
+    parser.add_argument("--judge-mode", type=str, default="benign-harm",
+                        choices=["benign-harm", "shift"])
     parser.add_argument("--api-key", type=str, default=None)
 
     # Module 6: Clustering
@@ -325,10 +343,12 @@ Examples:
             max_passages=args.max_passages,
             judge_method=args.judge_method,
             judge_threshold=args.judge_threshold,
+            judge_mode=args.judge_mode,
             api_key=args.api_key,
             n_pca_dims=args.n_pca_dims,
             fpr_target=args.fpr_target,
             evaluate_baselines=args.evaluate_baselines,
+            detector_source=args.detector_source,
             force=args.force,
         )
 

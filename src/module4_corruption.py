@@ -70,12 +70,17 @@ def extract_activation(model, tokenizer, text: str, layer_idx: int,
         outputs = model(**inputs)
 
     all_states = outputs.hidden_states
-    if layer_idx >= len(all_states):
-        raise ValueError(f"Layer {layer_idx} out of bounds (max {len(all_states)-1})")
+    # Layer-index convention: hidden_states[0] is the embedding output, so the
+    # OUTPUT of transformer block `layer_idx` is hidden_states[layer_idx + 1].
+    # This must match module2/v2 extraction (hidden_states[L+1]) and the injection
+    # hook, which hooks layers[layer_idx] (whose output is hidden_states[layer_idx+1]).
+    hs_idx = layer_idx + 1
+    if hs_idx >= len(all_states):
+        raise ValueError(f"Layer {layer_idx} out of bounds (max {len(all_states)-2})")
 
-    seq_len = all_states[layer_idx].shape[1]
+    seq_len = all_states[hs_idx].shape[1]
     actual_k = min(k, seq_len)
-    f_L = all_states[layer_idx][0, -actual_k:, :].mean(dim=0)  # [D]
+    f_L = all_states[hs_idx][0, -actual_k:, :].mean(dim=0)  # [D]
     return f_L.to(torch.float32)
 
 

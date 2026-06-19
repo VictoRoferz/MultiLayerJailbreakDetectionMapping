@@ -106,6 +106,46 @@ def load_successful_perturbations(layer_idx: int) -> dict:
     }
 
 
+def load_data_directions(layer_idx: int) -> dict:
+    """
+    Option B: build jailbreak directions directly from the v2 dataset's REAL
+    successful-jailbreak activations, no generator / live model required.
+
+    direction = successful_jailbreak_activation - benign_centroid
+
+    This mirrors the detector's inference-time comparison (test_act - benign_centroid),
+    so the PCA space and cluster centers live in the same coordinate frame as
+    Option A's generator-delta clustering. Reads adapter outputs:
+        harmful_activations.pt  (successful jailbreaks, bare tensor)
+        benign_centroid.pt      (mean of train benign acts, bare tensor)
+    """
+    base = Path("artifacts") / f"layer_{layer_idx}"
+    harm_path = base / "harmful_activations.pt"
+    cent_path = base / "benign_centroid.pt"
+    if not harm_path.exists() or not cent_path.exists():
+        raise FileNotFoundError(
+            f"Option B needs {harm_path.name} + {cent_path.name} in {base}. "
+            f"Run: python src/v2_to_artifacts.py --layers {layer_idx}"
+        )
+
+    harmful = torch.load(harm_path, weights_only=True).to(torch.float32)
+    centroid = torch.load(cent_path, weights_only=True).to(torch.float32)
+    directions = harmful - centroid.unsqueeze(0)
+
+    if len(directions) < 2:
+        raise ValueError(
+            f"Only {len(directions)} successful jailbreaks at layer {layer_idx}; "
+            f"too few to cluster."
+        )
+
+    return {
+        "delta_f": directions,
+        "f_L": None,
+        "metadata": [],
+        "n_successful": len(directions),
+    }
+
+
 def ensure_figures_dir(layer_idx: int) -> Path:
     fig_dir = Path("artifacts") / f"layer_{layer_idx}" / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -384,6 +424,7 @@ def run_clustering(
     k_max: int = 21,
     dbscan_min_samples: int = 5,
     save_plots: bool = True,
+    source: str = "generator",
 ) -> dict:
     """
     Full Module 6 pipeline.
@@ -402,8 +443,13 @@ def run_clustering(
     print(f"  Module 6: Clustering — Layer {layer_idx}")
     print(f"{'='*60}")
 
-    # Load data
-    perturbation_data = load_successful_perturbations(layer_idx)
+    # Load data — Option A (generator deltas, default) or Option B (real-data diffs)
+    if source == "data":
+        print("  Source: REAL v2 jailbreak activations (Option B, offline)")
+        perturbation_data = load_data_directions(layer_idx)
+    else:
+        print("  Source: generator deltas via module4/5 (Option A)")
+        perturbation_data = load_successful_perturbations(layer_idx)
     delta_f = perturbation_data["delta_f"]
     f_L = perturbation_data["f_L"]
 
@@ -581,6 +627,11 @@ Examples:
     parser.add_argument("--k-max", type=int, default=21)
     parser.add_argument("--dbscan-min-samples", type=int, default=5)
     parser.add_argument("--no-plots", action="store_true")
+    parser.add_argument("--source", type=str, default="generator",
+                        choices=["generator", "data"],
+                        help="generator: cluster generator deltas from module5 "
+                             "(Option A). data: cluster real v2 jailbreak "
+                             "directions (Option B, offline).")
 
     args = parser.parse_args()
 
@@ -593,7 +644,8 @@ Examples:
             try:
                 results = run_clustering(
                     layer_idx, args.n_pca_dims, args.k_min, args.k_max,
-                    args.dbscan_min_samples, save_plots=not args.no_plots
+                    args.dbscan_min_samples, save_plots=not args.no_plots,
+                    source=args.source
                 )
                 all_results[layer_idx] = results
             except (FileNotFoundError, ValueError) as e:
@@ -614,5 +666,6 @@ Examples:
     else:
         run_clustering(
             int(args.layer), args.n_pca_dims, args.k_min, args.k_max,
-            args.dbscan_min_samples, save_plots=not args.no_plots
+            args.dbscan_min_samples, save_plots=not args.no_plots,
+            source=args.source
         )

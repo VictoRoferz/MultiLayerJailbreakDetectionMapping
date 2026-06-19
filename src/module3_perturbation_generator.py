@@ -1722,12 +1722,14 @@ def validate_with_llm(
         with torch.no_grad():
             clean_out = model(**inputs)
         all_states = clean_out.hidden_states
-        if layer_idx >= len(all_states):
+        # hidden_states[L+1] = output of block L (matches v2 dataset + injection hook)
+        hs_idx = layer_idx + 1
+        if hs_idx >= len(all_states):
             continue
 
-        seq_len = all_states[layer_idx].shape[1]
+        seq_len = all_states[hs_idx].shape[1]
         k = min(5, seq_len)
-        f_L = all_states[layer_idx][0, -k:, :].mean(dim=0).to(device)  # [d] -> generator's device
+        f_L = all_states[hs_idx][0, -k:, :].mean(dim=0).to(device)  # [d] -> generator's device
 
         # Step 2: Generate delta_f
         z = torch.randn(1, generator.z_dim, device=device)
@@ -1770,7 +1772,8 @@ def validate_with_llm(
         # Step 4: Generate
         try:
             with torch.no_grad():
-                gen_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
+                gen_ids = model.generate(**inputs, max_new_tokens=max_new_tokens,
+                                         do_sample=False)
             response = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
 
             # Check for jailbreak (no refusal + coherent + relevant)
@@ -1892,11 +1895,13 @@ def extract_harmful_activations(
 
         all_states = outputs.hidden_states
         for layer_idx in layers:
-            if layer_idx >= len(all_states):
+            # hidden_states[L+1] = output of block L (matches v2 dataset convention)
+            hs_idx = layer_idx + 1
+            if hs_idx >= len(all_states):
                 continue
-            seq_len = all_states[layer_idx].shape[1]
+            seq_len = all_states[hs_idx].shape[1]
             actual_k = min(k, seq_len)
-            act = all_states[layer_idx][0, -actual_k:, :].mean(dim=0)
+            act = all_states[hs_idx][0, -actual_k:, :].mean(dim=0)
             storage[layer_idx].append(act.cpu().to(torch.float32))
 
     return {l: torch.stack(acts) for l, acts in storage.items() if acts}
@@ -2619,8 +2624,18 @@ def main(args):
             output_hidden_states=True,
         )
         llm_model.eval()
-        print("[-] Loading harmful passages for validation...")
-        passages = load_harmful_passages(n_passages=200)
+        # BENIGN-INJECTION paradigm: we inject delta into benign prompts and check
+        # whether the model produces harmful content (activation steering). So
+        # validation passages are BENIGN, not harmful. Prefer the v2-derived benign
+        # prompts (artifacts/test_passages.pt); fall back to WikiText.
+        bp_path = Path("artifacts") / "test_passages.pt"
+        if bp_path.exists():
+            passages = torch.load(bp_path, weights_only=False)[:200]
+            print(f"[-] Loaded {len(passages)} benign validation passages "
+                  f"from {bp_path}")
+        else:
+            print("[-] No test_passages.pt; loading WikiText benign passages...")
+            passages = load_passages(n_passages=200)
 
     # ── Load benign activations ────────────────────────────────────────────
     print(f"[-] Loading benign activations for layer {args.layer}...")
@@ -2907,7 +2922,7 @@ def main(args):
                 # Clean response (no perturbation)
                 with torch.no_grad():
                     clean_ids = llm_model.generate(
-                        **inputs, max_new_tokens=256
+                        **inputs, max_new_tokens=256, do_sample=False
                     )
                 clean_response = llm_tokenizer.decode(
                     clean_ids[0], skip_special_tokens=True
@@ -2917,9 +2932,11 @@ def main(args):
                 with torch.no_grad():
                     clean_out = llm_model(**inputs)
                 all_states = clean_out.hidden_states
-                seq_len = all_states[args.layer].shape[1]
+                # hidden_states[L+1] = output of block L (matches v2 dataset convention)
+                hs_idx = args.layer + 1
+                seq_len = all_states[hs_idx].shape[1]
                 k = min(5, seq_len)
-                f_L = all_states[args.layer][0, -k:, :].mean(dim=0).to(device)
+                f_L = all_states[hs_idx][0, -k:, :].mean(dim=0).to(device)
 
                 z = torch.randn(1, generator.z_dim, device=device)
                 with torch.no_grad():
@@ -2946,7 +2963,7 @@ def main(args):
                 try:
                     with torch.no_grad():
                         pert_ids = llm_model.generate(
-                            **inputs, max_new_tokens=256
+                            **inputs, max_new_tokens=256, do_sample=False
                         )
                     pert_response = llm_tokenizer.decode(
                         pert_ids[0], skip_special_tokens=True

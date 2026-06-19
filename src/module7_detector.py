@@ -352,6 +352,11 @@ def load_activations_for_eval(layer_idx: int) -> dict:
         test_labels = test_data["labels"].numpy()
         test_benign = test_acts[test_labels == 0.0]
         harmful = test_acts[test_labels == 1.0]
+        # Hard honest metric: refused = non-benign prompts the model did NOT comply
+        # with. Distinguishing jailbroken vs refused (topic held constant) is the
+        # real test; benign-vs-anything is the topic confound. Uses the adapter's
+        # stored categories + success when present.
+        test_refused = _extract_refused(test_data, test_acts)
     elif test_path.exists():
         # Fallback: only test split available, split benign for calibration
         print("  [WARN] No val split found, splitting test benign for calibration")
@@ -363,17 +368,30 @@ def load_activations_for_eval(layer_idx: int) -> dict:
         n_cal = len(benign) // 2
         calibration_benign = benign[:n_cal]
         test_benign = benign[n_cal:]
+        test_refused = _extract_refused(data, all_acts)
     else:
         raise FileNotFoundError(
             f"No split activation files at {base}. "
-            f"Run Extraction.py first to create val/test splits."
+            f"Run src/v2_to_artifacts.py (or Extraction.py) to create val/test splits."
         )
 
     return {
         "calibration_benign": calibration_benign,
         "test_benign": test_benign,
         "harmful": harmful,
+        "test_refused": test_refused,
     }
+
+
+def _extract_refused(data: dict, acts: np.ndarray):
+    """Return activations of refused non-benign prompts (success==0, category!=benign),
+    or None if the file lacks categories/success (e.g. legacy Extraction.py splits)."""
+    if "categories" not in data or "success" not in data:
+        return None
+    cats = np.array(data["categories"])
+    succ = data["success"].numpy()
+    refused_mask = (cats != "benign") & (succ == 0)
+    return acts[refused_mask] if refused_mask.any() else None
 
 
 def run_detector(
@@ -434,8 +452,30 @@ def run_detector(
     print(f"\n  Our detector:")
     print(f"    TPR:  {our_results['tpr']:.4f} ({our_results['tpr']*100:.1f}%)")
     print(f"    FPR:  {our_results['fpr']:.4f} ({our_results['fpr']*100:.1f}%)")
-    print(f"    AUC:  {our_results['auc']:.4f}")
+    print(f"    AUC (jailbroken vs benign+refused): {our_results['auc']:.4f}")
     print(f"    F1:   {our_results['f1']:.4f}")
+
+    # ── HARD honest metric: jailbroken vs REFUSED (topic held constant) ───
+    # The AUC above mixes easy benign negatives with hard refused ones, so it is
+    # inflated by the benign-vs-harmful topic confound. The number that actually
+    # reflects jailbreak detection is jailbroken vs refused (non-benign only).
+    test_refused = eval_data.get("test_refused")
+    if test_refused is not None and len(test_refused) > 0:
+        jb_scores = detector.score(eval_data["harmful"])
+        ref_scores = detector.score(test_refused)
+        scores = np.concatenate([jb_scores, ref_scores])
+        labels = np.concatenate([np.ones(len(jb_scores)), np.zeros(len(ref_scores))])
+        try:
+            auc_hard = float(roc_auc_score(labels, -scores))  # lower score = jailbreak
+        except ValueError:
+            auc_hard = 0.5
+        our_results["auc_hard_jb_vs_refused"] = auc_hard
+        our_results["n_refused"] = int(len(test_refused))
+        print(f"    AUC (jailbroken vs REFUSED, HARD): {auc_hard:.4f} "
+              f"(n_refused={len(test_refused)})  <-- the honest metric")
+    else:
+        print(f"    [note] No refused activations available; skipping HARD metric "
+              f"(re-run v2_to_artifacts.py so test split carries categories/success).")
 
     all_results = {"ours": our_results}
 

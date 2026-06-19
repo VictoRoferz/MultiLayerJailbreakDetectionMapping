@@ -1,3 +1,12 @@
 .DS_Store
 CLAUDE.md
 .venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Data & model artifacts — kept local / on HuggingFace, never in git
+*.pt
+*.parquet
+hf_analysis/**/data/

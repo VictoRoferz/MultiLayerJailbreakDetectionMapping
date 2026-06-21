@@ -115,6 +115,58 @@ def load_activations(layer_idx: int) -> dict:
     }
 
 
+def load_full_with_categories(layer_idx: int) -> dict:
+    """
+    Load activations + categories + labels from labeled_data/full_dataset.pt.
+
+    Splits the data into three classes:
+      benign           : category == 'benign'   (auto-label 0, WikiText)
+      refused          : category != 'benign' AND label == 0
+                         (harmful_direct or jailbreak_wrapped where Gemma refused
+                          or produced no substantive harm — judge returned 0)
+      jailbroken       : label == 1
+                         (GPT-4 judge confirmed substantive harm)
+
+    Returns dict with three tensors plus 'all' for joint PCA fitting.
+    """
+    full_path = Path("artifacts") / "labeled_data" / "full_dataset.pt"
+    if not full_path.exists():
+        raise FileNotFoundError(
+            f"{full_path} not found. Run module2_labeling_extraction.py first."
+        )
+
+    data = torch.load(full_path, weights_only=False)
+    if "activations" not in data or layer_idx not in data["activations"]:
+        raise KeyError(
+            f"Layer {layer_idx} not present in {full_path}. "
+            f"Available: {sorted(data.get('activations', {}).keys())}"
+        )
+
+    acts_list = data["activations"][layer_idx]
+    if len(acts_list) == 0:
+        raise RuntimeError(f"No activations stored for layer {layer_idx}.")
+
+    acts = torch.stack(acts_list)
+    labels = torch.tensor(data["labels"], dtype=torch.long)
+    categories = list(data["categories"])
+
+    benign_idx = [i for i, (c, l) in enumerate(zip(categories, labels.tolist()))
+                  if c == "benign" and l == 0]
+    refused_idx = [i for i, (c, l) in enumerate(zip(categories, labels.tolist()))
+                   if c != "benign" and l == 0]
+    jb_idx = [i for i, l in enumerate(labels.tolist()) if l == 1]
+
+    return {
+        "benign": acts[benign_idx],
+        "refused": acts[refused_idx],
+        "jailbroken": acts[jb_idx],
+        "all": acts,
+        "labels": labels,
+        "categories": categories,
+        "layer": layer_idx,
+    }
+
+
 def load_generator(layer_idx: int, architecture: str = "mlp",
                    device: torch.device = torch.device("cpu")):
     """
@@ -333,6 +385,80 @@ def analysis_raw_activation_space(layer_idx: int, save_plots: bool = True) -> di
         "pca_advantage": float(sil_score - sil_random),
     }
     return results
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Section 2b: Three-Class PCA — benign / refused-harmful / jailbroken     ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+def analysis_three_class_pca(layer_idx: int, save_plots: bool = True) -> dict:
+    """
+    PCA-2D scatter that separates the binary 'harmful' class into:
+      blue   — benign (WikiText, auto-label 0)
+      orange — harmful prompt that did NOT jailbreak Gemma
+               (category in {harmful_direct, jailbreak_wrapped} AND label 0)
+      red    — jailbroken (label 1, judge-confirmed substantive harm)
+
+    Reads from labeled_data/full_dataset.pt because the per-split tensors only
+    keep the binary label and lose the category.
+    """
+    print(f"\n{'='*60}")
+    print(f"  Three-Class PCA — Layer {layer_idx}")
+    print(f"{'='*60}")
+
+    data = load_full_with_categories(layer_idx)
+    benign = data["benign"].numpy()
+    refused = data["refused"].numpy()
+    jailbroken = data["jailbroken"].numpy()
+    all_acts = data["all"].numpy()
+
+    print(f"  Benign (WikiText):                    {len(benign)}")
+    print(f"  Harmful prompt, no jailbreak:         {len(refused)}")
+    print(f"  Jailbroken (label=1):                 {len(jailbroken)}")
+
+    pca = PCA(n_components=2)
+    pca.fit(all_acts)
+    benign_2d = pca.transform(benign) if len(benign) else np.empty((0, 2))
+    refused_2d = pca.transform(refused) if len(refused) else np.empty((0, 2))
+    jb_2d = pca.transform(jailbroken) if len(jailbroken) else np.empty((0, 2))
+
+    var_pc1 = pca.explained_variance_ratio_[0]
+    var_pc2 = pca.explained_variance_ratio_[1]
+
+    if save_plots and HAS_PLOTTING:
+        fig_dir = ensure_figures_dir(layer_idx)
+        fig, ax = plt.subplots(figsize=(9, 7))
+        if len(benign_2d):
+            ax.scatter(benign_2d[:, 0], benign_2d[:, 1],
+                       c="steelblue", alpha=0.4, s=14,
+                       label=f"Benign — WikiText (n={len(benign_2d)})")
+        if len(refused_2d):
+            ax.scatter(refused_2d[:, 0], refused_2d[:, 1],
+                       c="darkorange", alpha=0.5, s=18,
+                       label=f"Harmful prompt, refused (n={len(refused_2d)})")
+        if len(jb_2d):
+            ax.scatter(jb_2d[:, 0], jb_2d[:, 1],
+                       c="crimson", alpha=0.55, s=20,
+                       label=f"Jailbroken (n={len(jb_2d)})")
+        ax.set_xlabel(f"PC1 ({var_pc1*100:.1f}% var)")
+        ax.set_ylabel(f"PC2 ({var_pc2*100:.1f}% var)")
+        ax.set_title(f"Three-Class PCA — Layer {layer_idx}")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        out_path = fig_dir / "three_class_pca.png"
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved figure: {out_path}")
+
+    return {
+        "layer": layer_idx,
+        "n_benign": int(len(benign)),
+        "n_refused_harmful": int(len(refused)),
+        "n_jailbroken": int(len(jailbroken)),
+        "explained_variance_pc1": float(var_pc1),
+        "explained_variance_pc2": float(var_pc2),
+    }
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -708,12 +834,12 @@ def save_results(results: dict, layer_idx: int, filename: str = "pca_results.jso
 # ║  Section 6: Main + CLI                                                   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-ANALYSIS_CHOICES = ["all", "raw", "perturbation", "cross-layer"]
+ANALYSIS_CHOICES = ["all", "raw", "three-class", "perturbation", "cross-layer"]
 
 
 def main(args):
     """Dispatch to requested analyses."""
-    analyses = [args.analysis] if args.analysis != "all" else ["raw", "perturbation", "cross-layer"]
+    analyses = [args.analysis] if args.analysis != "all" else ["raw", "three-class", "perturbation", "cross-layer"]
     save_plots = not args.no_plots
     all_results = {}
 
@@ -728,6 +854,20 @@ def main(args):
                 results = analysis_raw_activation_space(args.layer_idx, save_plots=save_plots)
                 all_results["raw"] = results
                 save_results(results, args.layer_idx)
+
+        elif analysis == "three-class":
+            if args.layer_idx == "all":
+                for layer in DEFAULT_LAYERS:
+                    try:
+                        results = analysis_three_class_pca(layer, save_plots=save_plots)
+                        all_results[f"three_class_layer_{layer}"] = results
+                        save_results(results, layer, filename="three_class_pca.json")
+                    except (FileNotFoundError, KeyError, RuntimeError) as e:
+                        print(f"  [SKIP] Layer {layer}: {e}")
+            else:
+                results = analysis_three_class_pca(args.layer_idx, save_plots=save_plots)
+                all_results["three_class"] = results
+                save_results(results, args.layer_idx, filename="three_class_pca.json")
 
         elif analysis == "perturbation":
             if args.layer_idx == "all":

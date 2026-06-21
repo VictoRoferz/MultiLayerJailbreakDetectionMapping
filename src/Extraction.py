@@ -6,19 +6,26 @@ Extraction.py
 Module 1 — Data Preparation:
     - Loads WikiText-103 as the benign corpus (capped at --n-samples, default 10000).
     - Loads harmful prompts from 5 datasets:
-        TrustAIRLab, AdvBench, HarmBench, JailbreakBench, SaladBench
-    - Filters benign to [64, 256] tokens, harmful to [16, 256] tokens.
-    - Splits both into 70/10/20 train/val/test with fixed seed.
+        TrustAIRLab (templates), AdvBench, HarmBench, JailbreakBench, SaladBench.
+    - TrustAIRLab templates are **filled with a random harmful request** from the
+      other four benchmarks so the attack has a concrete payload.
+    - Per-source cap (--cap-per-source) stops any single benchmark from dominating.
+    - Filters both benign and harmful to [64, 512] tokens for length symmetry.
+    - Stratified 70/10/20 split preserves per-source proportions across splits.
 
 Module 2 — Activation Extraction:
-    - Extracts residual stream activations at layers {10, 15, 20, 25}.
-    - Uses the mean of the last 5 token positions as the sequence representation.
+    - Extracts residual-stream activations at layers {5, 10, 15, 20, 25}.
+    - Uses `hidden_states[L+1]` = output of transformer block L (off-by-one fix).
+    - Loads Gemma in bf16 on CUDA (matches training dtype, no fp16 underflow).
+    - Mean of the last 5 token positions is the sequence representation.
+    - Checkpoints every --save-every passages; --resume picks up from the last one.
     - Saves per-layer, per-split activation tensors with labels as .pt artifacts.
 
 Usage:
-    python src/Extraction.py --layers 10 15 20 25 --seed 42
-    python src/Extraction.py --layers 10 15 20 25 --n-samples 5000 --seed 42
-    python src/Extraction.py --layers 10 15 20 25 --n-harmful 0  # benign only
+    python src/Extraction.py --seed 42
+    python src/Extraction.py --layers 5 10 15 20 25 --n-samples 5000
+    python src/Extraction.py --cap-per-source 1000 --resume
+    python src/Extraction.py --n-harmful 0  # benign only (legacy)
 """
 
 import os
@@ -35,7 +42,9 @@ MODEL_NAME = "google/gemma-2-2b-it"
 DATASET_NAME = "wikitext"
 DATASET_CONFIG = "wikitext-103-raw-v1"
 
-# Harmful datasets (name, config, text_field, split)
+# Harmful datasets. `is_template=True` means this source provides jailbreak
+# templates that must be filled with a concrete harmful request (otherwise the
+# "attack" has nothing to ask). Other sources provide the request pool.
 HARMFUL_DATASETS = [
     {
         "name": "TrustAIRLab/in-the-wild-jailbreak-prompts",
@@ -43,6 +52,7 @@ HARMFUL_DATASETS = [
         "text_fields": ["prompt", "text", "question"],
         "split": "train",
         "needs_token": True,
+        "is_template": True,
     },
     {
         "name": "walledai/AdvBench",
@@ -50,6 +60,7 @@ HARMFUL_DATASETS = [
         "text_fields": ["prompt", "goal", "text"],
         "split": "train",
         "needs_token": True,
+        "is_template": False,
     },
     {
         "name": "walledai/HarmBench",
@@ -57,6 +68,7 @@ HARMFUL_DATASETS = [
         "text_fields": ["prompt", "goal", "text"],
         "split": "train",
         "needs_token": True,
+        "is_template": False,
     },
     {
         "name": "JailbreakBench/JBB-Behaviors",
@@ -64,6 +76,7 @@ HARMFUL_DATASETS = [
         "text_fields": ["Goal", "goal", "prompt", "text"],
         "split": "harmful",
         "needs_token": False,
+        "is_template": False,
     },
     {
         "name": "walledai/SaladBench",
@@ -71,8 +84,46 @@ HARMFUL_DATASETS = [
         "text_fields": ["prompt", "text", "question"],
         "split": "base",
         "needs_token": False,
+        "is_template": False,
+    },
+    {
+        # Adversarial harmful prompts curated for safety-classifier training.
+        # 261k rows total; the `data_type` filter keeps only the adversarial-
+        # harmful subset (wrapped attacks targeting policy-violating goals).
+        # Gated on HF — requires `HF_TOKEN` with dataset access accepted.
+        "name": "allenai/wildjailbreak",
+        "config": "train",
+        "text_fields": ["adversarial"],
+        "split": "train",
+        "needs_token": True,
+        "is_template": False,
+        "filter": {"data_type": "adversarial_harmful"},
     },
 ]
+
+# Template-filling: match known placeholder patterns, else append the request
+# after the template with a separator.
+PLACEHOLDER_PATTERNS = [
+    "{REQUEST}", "[REQUEST]", "{prompt}", "[INSERT PROMPT HERE]",
+    "[PROMPT]", "<REQUEST>", "{{prompt}}", "[your prompt]",
+    "[your question]", "{{REQUEST}}", "<<PROMPT>>", "[INSERT]",
+]
+
+
+def _find_placeholder(template: str):
+    lower = template.lower()
+    for p in PLACEHOLDER_PATTERNS:
+        if p.lower() in lower:
+            return p
+    return None
+
+
+def fill_template(template: str, request: str) -> str:
+    p = _find_placeholder(template)
+    if p is not None:
+        idx = template.lower().find(p.lower())
+        return template[:idx] + request + template[idx + len(p):]
+    return f"{template}\n\n{request}"
 
 
 def get_device():
@@ -121,26 +172,44 @@ def prepare_benign_dataset(tokenizer, n_samples: int = 10000,
     return filtered
 
 
-def prepare_harmful_dataset(tokenizer, n_harmful: int = 0,
-                            min_tokens: int = 16,
-                            max_tokens: int = 256) -> list:
+def prepare_harmful_dataset(
+    tokenizer,
+    n_harmful: int = 0,
+    min_tokens: int = 64,
+    max_tokens: int = 512,
+    cap_per_source: int = 2000,
+    seed: int = 42,
+) -> tuple[list[str], list[str]]:
     """
-    Load harmful prompts from multiple datasets, filter by token length,
-    and deduplicate.
+    Load harmful prompts from 5 benchmarks, filter + dedupe, then **fill every
+    TrustAIRLab template with a random harmful request drawn from the other
+    benchmarks**. Without filling, TrustAIRLab templates describe an attack
+    but contain no concrete request, so Gemma has nothing substantive to
+    comply with.
+
+    Per-source cap prevents SaladBench (21k rows) from dominating the pool.
+    Full-text dedupe (not 200-char prefix) preserves filled-template variants.
 
     Args:
-        n_harmful: max harmful prompts (0 = use all).
+        n_harmful: optional global cap on the final pool (0 = no cap).
+        cap_per_source: max rows kept from any single benchmark.
 
     Returns:
-        list[str] of filtered harmful prompts.
+        (texts, sources) — sources tag each prompt for stratified splitting.
     """
     hf_token = os.environ.get("HF_TOKEN")
-    all_texts: list[str] = []
+    rng = random.Random(seed)
+
+    request_texts: list[str] = []
+    request_sources: list[str] = []
+    template_texts: list[str] = []
     seen: set = set()
 
     for ds_info in HARMFUL_DATASETS:
         name = ds_info["name"]
-        print(f"[-] Loading harmful dataset: {name}...")
+        is_template = ds_info.get("is_template", False)
+        print(f"[-] Loading harmful dataset: {name} "
+              f"({'templates' if is_template else 'requests'})...")
 
         try:
             kwargs = {"split": ds_info["split"]}
@@ -148,15 +217,18 @@ def prepare_harmful_dataset(tokenizer, n_harmful: int = 0,
                 kwargs["name"] = ds_info["config"]
             if ds_info.get("needs_token"):
                 kwargs["token"] = hf_token
-
             ds = load_dataset(name, **kwargs)
         except Exception as e:
             print(f"    [WARN] Failed to load {name}: {e}")
             continue
 
-        count_before = len(all_texts)
+        row_filter = ds_info.get("filter") or {}
+        n_kept_this_source = 0
         for item in ds:
-            # Try each text field until one works
+            # Row-level filter (e.g., wildjailbreak's data_type=adversarial_harmful).
+            if any(item.get(k) != v for k, v in row_filter.items()):
+                continue
+
             text = None
             for field in ds_info["text_fields"]:
                 text = item.get(field)
@@ -166,25 +238,54 @@ def prepare_harmful_dataset(tokenizer, n_harmful: int = 0,
                 continue
             text = text.strip()
 
-            # Deduplicate
-            text_lower = text.lower()[:200]
-            if text_lower in seen:
+            # Full-text dedupe (whitespace + case normalized).
+            key = " ".join(text.split()).lower()
+            if key in seen:
                 continue
-            seen.add(text_lower)
+            seen.add(key)
 
             token_len = len(tokenizer.encode(text, add_special_tokens=False))
-            if min_tokens <= token_len <= max_tokens:
-                all_texts.append(text)
+            if not (min_tokens <= token_len <= max_tokens):
+                continue
 
-        print(f"    -> {len(all_texts) - count_before} new prompts from {name}")
+            if is_template:
+                template_texts.append(text)
+            else:
+                request_texts.append(text)
+                request_sources.append(name)
+            n_kept_this_source += 1
 
-    print(f"[-] Total harmful prompts after filtering + dedup: {len(all_texts)}")
+            if cap_per_source > 0 and n_kept_this_source >= cap_per_source:
+                break
+
+        print(f"    -> {n_kept_this_source} kept from {name}")
+
+    # Fill TrustAIRLab templates with random requests from the pool.
+    all_texts: list[str] = list(request_texts)
+    all_sources: list[str] = list(request_sources)
+    if template_texts:
+        if request_texts:
+            for t in template_texts:
+                req = rng.choice(request_texts)
+                all_texts.append(fill_template(t, req))
+                all_sources.append("trustairlab_filled")
+            print(f"[-] Filled {len(template_texts)} TrustAIRLab templates "
+                  f"with harmful requests from {len(request_texts)} candidates")
+        else:
+            print("[!] No request pool available; keeping TrustAIRLab templates as-is")
+            all_texts.extend(template_texts)
+            all_sources.extend(["trustairlab"] * len(template_texts))
 
     if n_harmful > 0 and len(all_texts) > n_harmful:
-        all_texts = all_texts[:n_harmful]
-        print(f"    Capped to {n_harmful}")
+        idx = list(range(len(all_texts)))
+        rng.shuffle(idx)
+        idx = idx[:n_harmful]
+        all_texts = [all_texts[i] for i in idx]
+        all_sources = [all_sources[i] for i in idx]
+        print(f"[-] Global cap applied: {n_harmful}")
 
-    return all_texts
+    print(f"[-] Total harmful prompts: {len(all_texts)}")
+    return all_texts, all_sources
 
 
 def split_data(passages: list, ratios: tuple = (0.7, 0.1, 0.2),
@@ -210,16 +311,64 @@ def split_data(passages: list, ratios: tuple = (0.7, 0.1, 0.2),
     return train, val, test
 
 
+def split_data_stratified(
+    texts: list,
+    sources: list,
+    ratios: tuple = (0.7, 0.1, 0.2),
+    seed: int = 42,
+) -> tuple:
+    """
+    Stratified split that preserves per-source proportions across
+    train/val/test. Prevents entire benchmarks from landing in a single split.
+    """
+    assert len(texts) == len(sources)
+    rng = random.Random(seed)
+    by_source: dict = {}
+    for i, s in enumerate(sources):
+        by_source.setdefault(s, []).append(i)
+
+    train_idx: list = []
+    val_idx: list = []
+    test_idx: list = []
+    for s, idxs in by_source.items():
+        rng.shuffle(idxs)
+        n = len(idxs)
+        n_tr = int(n * ratios[0])
+        n_va = int(n * ratios[1])
+        train_idx.extend(idxs[:n_tr])
+        val_idx.extend(idxs[n_tr:n_tr + n_va])
+        test_idx.extend(idxs[n_tr + n_va:])
+
+    rng.shuffle(train_idx)
+    rng.shuffle(val_idx)
+    rng.shuffle(test_idx)
+
+    pick = lambda ids: [texts[i] for i in ids]
+    return pick(train_idx), pick(val_idx), pick(test_idx)
+
+
 # ---------------------------------------------------------------------------
 # Module 2: Activation Extraction
 # ---------------------------------------------------------------------------
 
 def extract_activations(model, tokenizer, passages: list[str],
                         layers: list[int], max_length: int,
-                        k: int = 5) -> tuple:
+                        k: int = 5,
+                        checkpoint_path=None,
+                        resume: bool = False,
+                        save_every: int = 500) -> tuple:
     """
     Run the frozen LLM on each passage and extract the mean of the last
     k token positions at each requested layer.
+
+    HuggingFace returns `hidden_states` of length n_layers + 1. Index 0 is
+    the embedding; index L+1 is the output of transformer block L. So to
+    read the residual-stream output of block `layer_idx`, we use
+    `all_states[layer_idx + 1]`. The previous version used `all_states[L]`
+    which silently shifted every reported layer down by one.
+
+    If `checkpoint_path` is set, progress is saved every `save_every`
+    passages. With `resume=True` we pick up from the last saved index.
 
     Returns:
         (storage, successful_indices) where:
@@ -229,9 +378,21 @@ def extract_activations(model, tokenizer, passages: list[str],
     assert hasattr(model, 'config'), "Model must have a config attribute"
 
     storage = {l: {"acts": []} for l in layers}
-    successful_indices = []
+    successful_indices: list = []
+    start = 0
 
-    for idx, text in enumerate(tqdm.tqdm(passages, desc="Extracting activations")):
+    if resume and checkpoint_path and Path(checkpoint_path).exists():
+        ckpt = torch.load(checkpoint_path, weights_only=False)
+        storage = ckpt["storage"]
+        successful_indices = ckpt["successful_indices"]
+        start = ckpt["next_idx"]
+        print(f"[-] Resumed from checkpoint {checkpoint_path} at idx={start}")
+
+    pbar = tqdm.tqdm(range(start, len(passages)),
+                    initial=start, total=len(passages),
+                    desc="Extracting activations")
+    for idx in pbar:
+        text = passages[idx]
         inputs = tokenizer(
             text,
             return_tensors="pt",
@@ -240,7 +401,7 @@ def extract_activations(model, tokenizer, passages: list[str],
         ).to(model.device)
 
         with torch.no_grad():
-            outputs = model(**inputs)
+            outputs = model(**inputs, output_hidden_states=True)
 
         all_states = outputs.hidden_states
         if all_states is None:
@@ -249,20 +410,36 @@ def extract_activations(model, tokenizer, passages: list[str],
 
         success = True
         for layer_idx in layers:
-            if layer_idx >= len(all_states):
+            hs_idx = layer_idx + 1  # off-by-one fix: [L+1] = output of block L
+            if hs_idx >= len(all_states):
                 print(f"[!] Layer {layer_idx} out of bounds "
-                      f"(max {len(all_states) - 1}). Skipping passage {idx}.")
+                      f"(hidden_states has {len(all_states)} entries). "
+                      f"Skipping passage {idx}.")
                 success = False
                 break
 
-            seq_len = all_states[layer_idx].shape[1]
+            seq_len = all_states[hs_idx].shape[1]
             actual_k = min(k, seq_len)
-            act = all_states[layer_idx][0, -actual_k:, :].mean(dim=0)
+            act = all_states[hs_idx][0, -actual_k:, :].mean(dim=0)
 
             storage[layer_idx]["acts"].append(act.cpu().to(torch.float32))
 
         if success:
             successful_indices.append(idx)
+
+        if checkpoint_path and save_every > 0 and (idx + 1) % save_every == 0:
+            torch.save({
+                "storage": storage,
+                "successful_indices": successful_indices,
+                "next_idx": idx + 1,
+            }, checkpoint_path)
+
+    if checkpoint_path:
+        torch.save({
+            "storage": storage,
+            "successful_indices": successful_indices,
+            "next_idx": len(passages),
+        }, checkpoint_path)
 
     return storage, successful_indices
 
@@ -275,15 +452,15 @@ def main(args):
     device = get_device()
     print(f"[-] Running on device: {device}")
 
-    # Load model & tokenizer
+    # Load model & tokenizer. bf16 matches Gemma's training dtype and avoids
+    # the fp16 underflow seen in some MLP activations.
     hf_token = os.environ.get("HF_TOKEN")
     print(f"[-] Loading model: {MODEL_NAME}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=hf_token)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         device_map="auto",
-        torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
-        output_hidden_states=True,
+        torch_dtype=torch.bfloat16 if device.type == "cuda" else torch.float32,
         token=hf_token,
     )
     model.eval()
@@ -298,14 +475,16 @@ def main(args):
 
     # Load harmful data (unless --n-harmful 0)
     if args.n_harmful != 0:
-        harmful_passages = prepare_harmful_dataset(
+        harmful_passages, harmful_sources = prepare_harmful_dataset(
             tokenizer,
             n_harmful=args.n_harmful if args.n_harmful > 0 else 0,
-            min_tokens=16,  # lower min for harmful (jailbreak prompts are often short)
+            min_tokens=args.min_tokens,   # aligned with benign (symmetry)
             max_tokens=args.max_tokens,
+            cap_per_source=args.cap_per_source,
+            seed=args.seed,
         )
     else:
-        harmful_passages = []
+        harmful_passages, harmful_sources = [], []
         print("[-] Skipping harmful data (--n-harmful 0)")
 
     # Print ratio
@@ -325,11 +504,12 @@ def main(args):
           f"val: {len(benign_val)}, test: {len(benign_test)}")
 
     if harmful_passages:
-        harm_train, harm_val, harm_test = split_data(
-            harmful_passages, ratios, args.seed
+        harm_train, harm_val, harm_test = split_data_stratified(
+            harmful_passages, harmful_sources, ratios, args.seed
         )
         print(f"    Harmful — train: {len(harm_train)}, "
-              f"val: {len(harm_val)}, test: {len(harm_test)}")
+              f"val: {len(harm_val)}, test: {len(harm_test)} "
+              f"(stratified by source)")
     else:
         harm_train, harm_val, harm_test = [], [], []
 
@@ -359,10 +539,14 @@ def main(args):
             continue
 
         print(f"\n[-] Extracting {split_name} split ({len(passages)} passages)...")
+        ckpt_path = base_dir / f"_checkpoint_{split_name}.pt"
         storage, successful_indices = extract_activations(
             model, tokenizer, passages,
             layers=args.layers,
             max_length=args.max_length,
+            checkpoint_path=ckpt_path,
+            resume=args.resume,
+            save_every=args.save_every,
         )
 
         if len(successful_indices) < len(passages):
@@ -463,8 +647,10 @@ Examples:
         """
     )
     parser.add_argument(
-        "--layers", type=int, nargs='+', default=[10, 15, 20, 25],
-        help="List of layers to extract from (e.g., 10 15 20)"
+        "--layers", type=int, nargs='+', default=[5, 10, 15, 20, 25],
+        help="Layers to extract from. L means residual-stream output of "
+             "transformer block L (hidden_states[L+1]). Default adds layer 5 "
+             "to expose early-layer signal alongside 10/15/20/25.",
     )
     parser.add_argument(
         "--n-samples", type=int, default=10000,
@@ -475,13 +661,25 @@ Examples:
         help="Max harmful prompts (-1 = use all, 0 = skip harmful)",
     )
     parser.add_argument(
+        "--cap-per-source", type=int, default=2000,
+        help="Max rows kept from any single harmful benchmark. Prevents "
+             "SaladBench (21k) from dominating the pool. Set 0 to disable.",
+    )
+    parser.add_argument(
         "--split-ratio", type=float, nargs=3, default=[0.7, 0.1, 0.2],
         help="Train/val/test split ratios (default: 0.7 0.1 0.2)",
     )
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducible splits")
-    parser.add_argument("--min-tokens", type=int, default=64)
-    parser.add_argument("--max-tokens", type=int, default=256)
-    parser.add_argument("--max-length", type=int, default=256)
+    parser.add_argument("--min-tokens", type=int, default=64,
+                        help="Applied to BOTH benign and harmful for length "
+                             "symmetry across classes.")
+    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--max-length", type=int, default=512,
+                        help="Tokenizer truncation cap during extraction.")
+    parser.add_argument("--save-every", type=int, default=500,
+                        help="Checkpoint every N passages during extraction.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume extraction from existing checkpoint file.")
     args = parser.parse_args()
     main(args)

@@ -89,6 +89,17 @@ def load_prompts(repo, n, device=None):
     return out
 
 
+def random_matched(steer_vec, seed):
+    """Random unit direction per layer, scaled to the SAME norm as steer_vec[L].
+    Control: shows ASR comes from the LEARNED direction, not perturbation size."""
+    out = {}
+    for L, v in steer_vec.items():
+        torch.manual_seed(seed + L)
+        g = torch.randn_like(v)
+        out[L] = g / g.norm().clamp(min=1e-8) * v.norm()
+    return out
+
+
 def make_steer_hook(vec):
     """Persistent hook: add `vec` to ALL positions on EVERY forward pass."""
     def hook(module, args, output):
@@ -161,6 +172,12 @@ def main():
     ap.add_argument("--artifacts-root", default="artifacts")
     ap.add_argument("--judge-model", default="gpt-4o-mini")
     ap.add_argument("--api-key", default=None)
+    ap.add_argument("--random-control", action="store_true",
+                    help="also steer with a random unit direction at the SAME "
+                         "per-layer norm (control: proves it's the LEARNED direction)")
+    ap.add_argument("--ablation", action="store_true",
+                    help="steer-set = each single layer + cumulative sets "
+                         "(quantifies the 'distributed, not localized' claim)")
     args = ap.parse_args()
 
     from src.v2.config import get_config
@@ -178,11 +195,18 @@ def main():
     if not avail:
         raise SystemExit("No per-layer directions found. Run v2_to_artifacts.py first.")
 
-    # Steer configs: single (highest available layer) + multi (all available).
+    # Steer configs.
     top = max(avail)
-    steer_configs = {f"single_L{top}": [top]}
-    if len(avail) > 1:
-        steer_configs["multi_" + "-".join(map(str, avail))] = avail
+    if args.ablation:
+        # each single layer + cumulative sets -> locality / distributed claim
+        steer_configs = {f"single_L{L}": [L] for L in avail}
+        for i in range(1, len(avail) + 1):
+            cum = avail[:i]
+            steer_configs["cum_" + "-".join(map(str, cum))] = cum
+    else:
+        steer_configs = {f"single_L{top}": [top]}
+        if len(avail) > 1:
+            steer_configs["multi_" + "-".join(map(str, avail))] = avail
 
     print("[-] Loading model...")
     from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -225,11 +249,19 @@ def main():
                 asr, n_jb, samples = run_arm(model, tok, arm_prompts, steer_vec,
                                              api_key, args.judge_model,
                                              args.max_new_tokens)
-                print(f"  {cfg_name:>22} c={c:>4}: ASR={asr:.1%} "
-                      f"({n_jb}/{len(arm_prompts)})  rel|steer|/|act|={rel:.2f}")
-                results["arms"][arm].setdefault(cfg_name, []).append(
-                    {"c": c, "asr": asr, "n_jb": n_jb, "rel_norm": rel,
-                     "samples": samples})
+                entry = {"c": c, "asr": asr, "n_jb": n_jb, "rel_norm": rel,
+                         "samples": samples}
+                msg = (f"  {cfg_name:>22} c={c:>4}: ASR={asr:.1%} "
+                       f"({n_jb}/{len(arm_prompts)})  rel|steer|/|act|={rel:.2f}")
+                if args.random_control:
+                    rnd_vec = random_matched(steer_vec, seed=1000 + int(c * 10))
+                    r_asr, r_n, _ = run_arm(model, tok, arm_prompts, rnd_vec,
+                                            api_key, args.judge_model,
+                                            args.max_new_tokens)
+                    entry["random_asr"] = r_asr
+                    msg += f"  | random={r_asr:.1%}"
+                print(msg)
+                results["arms"][arm].setdefault(cfg_name, []).append(entry)
 
     out = art_root / "steering_sanity.json"
     out.parent.mkdir(parents=True, exist_ok=True)

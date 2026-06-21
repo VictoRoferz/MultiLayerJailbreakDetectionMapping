@@ -41,13 +41,15 @@ from module3_perturbation_generator import DEFAULT_LAYERS
 MODULE_NAMES = ["pca", "generator", "corruption", "judge", "clustering", "detector"]
 
 
-def check_artifacts(layer_idx: int, module: str) -> bool:
+def check_artifacts(layer_idx: int, module: str, architecture: str = "cvae") -> bool:
     """Check if a module's output artifacts already exist."""
     base = Path("artifacts") / f"layer_{layer_idx}"
-    arch_dir = base / "cvae"  # default architecture subdir
+    # CVAE generators live in a 'cvae/' subdir; MLP generators in the base dir.
+    gen_path = (base / "cvae" / "generator.pt" if architecture == "cvae"
+                else base / "generator.pt")
     checks = {
         "pca": base / "pca_results.json",
-        "generator": arch_dir / "generator.pt",
+        "generator": gen_path,
         "corruption": base / "corruption_results.pt",
         "judge": base / "judged_results.pt",
         "clustering": base / "cluster_centers.pt",
@@ -121,20 +123,45 @@ def run_pipeline(
 
     # ── Module 3: Generator Training ─────────────────────────────────────
     if "generator" in modules:
-        if not force and check_artifacts(layer_idx, "generator"):
+        if not force and check_artifacts(layer_idx, "generator", architecture):
             print(f"\n  [SKIP] Generator — artifacts exist")
         else:
+            import os
             from module3_perturbation_generator import main as gen_main
             print(f"\n  Running generator training (all phases)...")
             import types
+            # module3.main() reads MANY argparse fields off `args`; build a
+            # namespace with the exact names + module3's own defaults (the old
+            # version passed layer_idx/n_rl_steps/n_fw_iterations and omitted
+            # ~19 fields → AttributeError). Keep these in sync with module3's
+            # argparse defaults.
             gen_args = types.SimpleNamespace(
-                layer_idx=layer_idx,
-                architecture=architecture,
                 phase="all",
-                epsilon=epsilon,
+                layer=layer_idx,
+                architecture=architecture,
                 z_dim=32 if architecture == "cvae" else 64,
-                n_rl_steps=5000,
-                n_fw_iterations=3,
+                hidden_dim=1024,
+                ensemble_reward=True,
+                n_reward_models=5,
+                batch_size=128,
+                lr_warmup=1e-3,
+                lr_rl=1e-4,
+                lr_reward=1e-3,
+                epsilon=epsilon,
+                train_epsilon=0.3,
+                rl_steps=5000,
+                alpha_diversity=0.1,
+                gamma_entropy=0.01,
+                validation_interval=2000,
+                recalibration_interval=500,
+                fw_iterations=3,
+                fw_rl_steps=3000,
+                lambda_fw=0.2,
+                use_denoiser=False,
+                denoiser_steps=20,
+                denoiser_t_start=0.3,
+                n_harmful=500,
+                api_key=api_key or os.environ.get("OPENAI_API_KEY"),
             )
             try:
                 gen_main(gen_args)

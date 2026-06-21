@@ -73,6 +73,19 @@ def load_split_local(parquet_dir: str, split: str):
     return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
 
 
+def subsample(rows, frac: float, seed: int = 42):
+    """Randomly keep `frac` of the rows (seeded). Works for HF Datasets and
+    pandas DataFrames. frac>=1.0 returns rows unchanged."""
+    if frac is None or frac >= 1.0:
+        return rows
+    n = max(1, int(round(frac * len(rows))))
+    if hasattr(rows, "select") and hasattr(rows, "shuffle"):   # HF Dataset
+        return rows.shuffle(seed=seed).select(range(n))
+    if hasattr(rows, "sample"):                                # pandas DataFrame
+        return rows.sample(frac=frac, random_state=seed).reset_index(drop=True)
+    return rows[:n]
+
+
 def _col(rows, name):
     """Index a column from either an HF Dataset or a pandas DataFrame."""
     return rows[name]
@@ -134,6 +147,24 @@ def save_harmful(out_root, layer, acts, categories, success):
           f"(positive class for CVAE + Option-B clustering)")
 
 
+def save_refused(out_root, layer, acts, categories, success):
+    """refused_activations.pt = refused-harmful pool (the reward model's
+    refusal-axis NEGATIVE class). refused = non-benign AND success==0, i.e. every
+    harmful prompt the model did NOT comply with (harmful-direct refusals + FAILED
+    jailbreak attempts). Including failed GCG here is deliberate: the shared GCG
+    suffix then appears in both the positive (successful GCG) and negative (failed
+    GCG) pools, so it stops being a discriminative shortcut and the reward model is
+    forced onto the refusal axis instead of "has a suffix" / topic. Bare tensor."""
+    cats = np.array(categories)
+    refused_mask = (cats != "benign") & (success == 0)
+    out_dir = out_root / f"layer_{layer}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    refused = torch.from_numpy(acts[refused_mask])
+    torch.save(refused, out_dir / "refused_activations.pt")
+    print(f"    refused_activations.pt: {refused.shape[0]} refused-harmful acts "
+          f"(reward-model negative class)")
+
+
 def save_centroid(out_root, layer, acts, categories, src_split):
     """
     benign_centroid.pt = mean of benign activations. Computed from the VALIDATION
@@ -181,6 +212,11 @@ def main():
                     default="jailbreak-success",
                     help="val/test label semantics for module7. jailbreak-success = "
                          "honest; nonbenign = topic-confound baseline")
+    ap.add_argument("--frac", type=float, default=1.0,
+                    help="Fraction of each split to use (e.g. 0.5 = 50%% of the "
+                         "data, seeded). Cuts train/val/test + passages, so it "
+                         "proportionally lowers training, corruption and judge cost.")
+    ap.add_argument("--seed", type=int, default=42, help="subsample seed")
     args = ap.parse_args()
 
     cfg = get_config(args.target)
@@ -198,8 +234,14 @@ def main():
         if rows is None:
             print(f"[!] split '{hf_split}' not found; skipping")
             continue
+        n_full = len(rows)
+        rows = subsample(rows, args.frac, seed=args.seed)
         splits[hf_split] = rows
-        print(f"[-] loaded split '{hf_split}': {len(rows)} rows")
+        if args.frac < 1.0:
+            print(f"[-] loaded split '{hf_split}': {len(rows)}/{n_full} rows "
+                  f"(frac={args.frac})")
+        else:
+            print(f"[-] loaded split '{hf_split}': {len(rows)} rows")
 
     for layer in layers:
         print(f"\n[=] Layer {layer}")
@@ -216,6 +258,7 @@ def main():
                        label_target)
             if hf_split == "train":
                 save_harmful(out_root, layer, acts, categories, success)
+                save_refused(out_root, layer, acts, categories, success)
 
         # benign_centroid from validation (matches module7's calibration source);
         # fall back to train benign if no validation split is available.

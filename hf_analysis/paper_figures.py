@@ -49,7 +49,7 @@ FAMILIES = ["jailbreak_gcg_universal", "jailbreak_artprompt",
 SHORT = {"jailbreak_gcg_universal": "GCG-univ", "jailbreak_artprompt": "ArtPrompt",
          "jailbreak_gcg_individual": "GCG-indiv", "harmful_direct": "Direct"}
 JB_FAMILIES = ["jailbreak_gcg_universal", "jailbreak_artprompt", "jailbreak_gcg_individual"]
-MAIN_LAYER = {"gemma": 20, "vicuna": 20}   # single-layer figures use this
+MAIN_LAYER = {"gemma": 15, "vicuna": 10}   # peak T3-success layer per Table 2 (single-layer figs)
 MIN_N = 25
 N_BOOT = 1000
 

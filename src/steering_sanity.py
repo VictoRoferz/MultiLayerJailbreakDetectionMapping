@@ -111,10 +111,18 @@ def make_steer_hook(vec):
     return hook
 
 
-def generate(model, tokenizer, text, max_new_tokens):
+def generate(model, tokenizer, text, max_new_tokens, use_chat_template=True):
     dev = model.get_input_embeddings().weight.device
+    add_special = True
+    if use_chat_template and getattr(tokenizer, "chat_template", None):
+        # Render as an assistant turn (Gemma has a built-in template; Vicuna's is
+        # set from config in main). The template already adds BOS/special tokens.
+        text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": text}],
+            tokenize=False, add_generation_prompt=True)
+        add_special = False
     inputs = tokenizer(text, return_tensors="pt", truncation=True,
-                       max_length=256).to(dev)
+                       max_length=512, add_special_tokens=add_special).to(dev)
     with torch.no_grad():
         ids = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     return tokenizer.decode(ids[0][inputs["input_ids"].shape[1]:],
@@ -137,7 +145,7 @@ def judge(prompt, response, api_key, model_name):
 
 
 def run_arm(model, tokenizer, prompts, steer_vec, api_key, judge_model,
-            max_new_tokens):
+            max_new_tokens, use_chat_template=True):
     """ASR over prompts with a fixed steering vector (None = no steering)."""
     handles = []
     if steer_vec is not None:
@@ -147,7 +155,8 @@ def run_arm(model, tokenizer, prompts, steer_vec, api_key, judge_model,
     n_jb, samples = 0, []
     try:
         for text in prompts:
-            resp = generate(model, tokenizer, text, max_new_tokens)
+            resp = generate(model, tokenizer, text, max_new_tokens,
+                            use_chat_template=use_chat_template)
             jb = judge(text, resp, api_key, judge_model)
             n_jb += int(jb)
             if len(samples) < 3:
@@ -172,6 +181,10 @@ def main():
     ap.add_argument("--artifacts-root", default="artifacts")
     ap.add_argument("--judge-model", default="gpt-4o-mini")
     ap.add_argument("--api-key", default=None)
+    ap.add_argument("--raw-prompt", action="store_true",
+                    help="skip the chat template and generate on raw prompt text "
+                         "(default: render as an assistant turn — required for a "
+                         "valid Vicuna run, and recommended for Gemma too)")
     ap.add_argument("--random-control", action="store_true",
                     help="also steer with a random unit direction at the SAME "
                          "per-layer norm (control: proves it's the LEARNED direction)")
@@ -211,6 +224,12 @@ def main():
     print("[-] Loading model...")
     from transformers import AutoTokenizer, AutoModelForCausalLM
     tok = AutoTokenizer.from_pretrained(model_id, token=os.environ.get("HF_TOKEN"))
+    # Vicuna's tokenizer ships no chat_template; set it from config so the prompt
+    # is rendered as a proper assistant turn (else generation is invalid).
+    if cfg.get("chat_template") and not getattr(tok, "chat_template", None):
+        tok.chat_template = cfg["chat_template"]
+    use_ct = not args.raw_prompt
+    print(f"[-] chat template: {'on' if use_ct and getattr(tok,'chat_template',None) else 'off (raw prompt)'}")
     model = AutoModelForCausalLM.from_pretrained(
         model_id, device_map="auto",
         torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
@@ -235,7 +254,7 @@ def main():
         # Baseline (c=0, no steering) computed once per arm.
         base_asr, base_n, base_s = run_arm(model, tok, arm_prompts, None,
                                            api_key, args.judge_model,
-                                           args.max_new_tokens)
+                                           args.max_new_tokens, use_chat_template=use_ct)
         print(f"  baseline (c=0): ASR={base_asr:.1%} ({base_n}/{len(arm_prompts)})")
         results["arms"][arm]["baseline"] = {"asr": base_asr, "samples": base_s}
 
@@ -248,7 +267,7 @@ def main():
                           for L in cfg_layers) / len(cfg_layers)
                 asr, n_jb, samples = run_arm(model, tok, arm_prompts, steer_vec,
                                              api_key, args.judge_model,
-                                             args.max_new_tokens)
+                                             args.max_new_tokens, use_chat_template=use_ct)
                 entry = {"c": c, "asr": asr, "n_jb": n_jb, "rel_norm": rel,
                          "samples": samples}
                 msg = (f"  {cfg_name:>22} c={c:>4}: ASR={asr:.1%} "
@@ -257,7 +276,7 @@ def main():
                     rnd_vec = random_matched(steer_vec, seed=1000 + int(c * 10))
                     r_asr, r_n, _ = run_arm(model, tok, arm_prompts, rnd_vec,
                                             api_key, args.judge_model,
-                                            args.max_new_tokens)
+                                            args.max_new_tokens, use_chat_template=use_ct)
                     entry["random_asr"] = r_asr
                     msg += f"  | random={r_asr:.1%}"
                 print(msg)

@@ -76,14 +76,17 @@ FAM_COLOR = {"benign": CB["grey"], "harmful_direct": CB["orange"],
 
 def setup_style():
     plt.rcParams.update({
-        "figure.dpi": 120, "savefig.dpi": 300, "savefig.bbox": "tight",
+        "figure.dpi": 150, "savefig.dpi": 400, "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.03, "pdf.fonttype": 42, "ps.fonttype": 42,
         "figure.constrained_layout.use": True,
-        "font.family": "DejaVu Sans", "font.size": 11,
-        "axes.titlesize": 12, "axes.titleweight": "bold", "axes.labelsize": 11,
-        "legend.fontsize": 9, "legend.frameon": False,
-        "xtick.labelsize": 10, "ytick.labelsize": 10,
+        "font.family": "DejaVu Sans", "font.size": 13,
+        "axes.titlesize": 14, "axes.titleweight": "bold", "axes.labelsize": 13,
+        "axes.linewidth": 1.0,
+        "legend.fontsize": 11, "legend.frameon": False,
+        "xtick.labelsize": 12, "ytick.labelsize": 12,
+        "lines.linewidth": 2.2, "lines.markersize": 7,
         "axes.spines.top": False, "axes.spines.right": False,
-        "axes.grid": True, "grid.alpha": 0.25, "grid.linewidth": 0.6,
+        "axes.grid": True, "grid.alpha": 0.3, "grid.linewidth": 0.6,
     })
 
 
@@ -155,6 +158,20 @@ def tpr_at_fpr(pos_scores, neg_scores, fpr=0.02):
     """Higher score = more jailbreak-like. Threshold set on negatives."""
     thr = np.quantile(neg_scores, 1 - fpr)
     return float(np.mean(np.asarray(pos_scores) >= thr))
+
+
+def centroid_auroc_ci(pos_scores, neg_scores, n_boot=300):
+    y = np.r_[np.ones(len(pos_scores)), np.zeros(len(neg_scores))]
+    s = np.r_[pos_scores, neg_scores]
+    base = roc_auc_score(y, s)
+    boots = []
+    for _ in range(n_boot):
+        idx = RNG.integers(0, len(y), len(y))
+        if len(np.unique(y[idx])) < 2:
+            continue
+        boots.append(roc_auc_score(y[idx], s[idx]))
+    lo, hi = np.percentile(boots, [2.5, 97.5]) if boots else (base, base)
+    return round(float(base), 3), round(float(lo), 3), round(float(hi), 3)
 
 
 def centroid_scores(centroid, X):
@@ -236,28 +253,28 @@ def targets():
                                   note="GCG suffix is trivially detectable (artifact) but only this fraction are real jailbreaks"))
     save_table("table2_targets", pd.DataFrame(rows))
     # Fig 2: grouped bars T1 vs T3 with CIs, both models
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=(6.6, 4.3))
     models = list(bars)
-    x = np.arange(len(models)); w = 0.35
+    x = np.arange(len(models)); w = 0.40
     tcol = {"T1": CB["grey"], "T3": CB["blue"]}
-    tlab = {"T1": "T1 intent (benign vs harmful topic)",
-            "T3": "T3 success (jailbroken vs refused-harmful)"}
+    tlab = {"T1": "T1: intent", "T3": "T3: success"}
     for i, t in enumerate(["T1", "T3"]):
         vals = [bars[m][t][0] for m in models]
         err = [[bars[m][t][0] - bars[m][t][1] for m in models],
                [bars[m][t][2] - bars[m][t][0] for m in models]]
-        bb = ax.bar(x + (i - 0.5) * w, vals, w, yerr=err, capsize=4,
-                    color=tcol[t], label=tlab[t])
+        bb = ax.bar(x + (i - 0.5) * w, vals, w, yerr=err, capsize=5,
+                    color=tcol[t], edgecolor="white", linewidth=1.2,
+                    error_kw=dict(lw=1.5), label=tlab[t], zorder=3)
         for b, v, eu in zip(bb, vals, err[1]):
-            ax.text(b.get_x() + b.get_width() / 2, v + eu + 0.015, f"{v:.2f}",
-                    ha="center", va="bottom", fontsize=9, fontweight="bold")
+            ax.text(b.get_x() + b.get_width() / 2, v + eu + 0.02, f"{v:.2f}",
+                    ha="center", va="bottom", fontsize=12, fontweight="bold")
     ax.axhline(0.5, ls="--", c=CB["vermillion"], lw=1)
     ax.text(ax.get_xlim()[1], 0.5, " chance", va="center", ha="left",
             fontsize=8, color=CB["vermillion"])
-    ax.set_xticks(x); ax.set_xticklabels([m.capitalize() for m in models]); ax.set_ylim(0.4, 1.06)
+    ax.set_xticks(x); ax.set_xticklabels([m.capitalize() for m in models]); ax.set_ylim(0.4, 1.18)
     ax.set_ylabel("test AUROC (95% CI)")
-    ax.set_title("Same activations, different detection target\n→ very different accuracy")
-    ax.legend(loc="lower center")
+    ax.set_title("Same activations, very different accuracy by target")
+    ax.legend(loc="upper right", ncol=1)
     save_fig(fig, "fig2_targets")
 
 # ───────────────────────── Fig 3: MDS + cosine heatmap ─────────────────────────
@@ -288,6 +305,10 @@ def families():
                     H[i, j] = h1 @ h2
                 else:
                     H[i, j] = dirs[a] @ dirs[b]
+        for i, a in enumerate(fams):
+            for j, b in enumerate(fams):
+                if i < j:
+                    print(f"  {model} L{L}: cos({SHORT[a]}, {SHORT[b]}) = {H[i,j]:.3f}")
         fig, ax = plt.subplots(figsize=(5, 4))
         im = ax.imshow(H, cmap="RdBu_r", vmin=-0.5, vmax=1)
         ax.set_xticks(range(len(fams))); ax.set_yticks(range(len(fams)))
@@ -380,17 +401,21 @@ def lofo():
             cen_cross = X[other_mask].mean(0)
             s_pos_c, s_neg_c = centroid_scores(cen_cross, held_X), centroid_scores(cen_cross, neg)
             tpr_c = tpr_at_fpr(s_pos_c, s_neg_c)
-            auc_c = roc_auc_score([1]*len(s_pos_c) + [0]*len(s_neg_c), np.r_[s_pos_c, s_neg_c])
+            auc_c, auc_c_lo, auc_c_hi = centroid_auroc_ci(s_pos_c, s_neg_c)
             # within-mechanism (few-shot, k=25): centroid from held family itself
             perm = RNG.permutation(len(held_X)); k = min(25, len(held_X)//2)
             cen_in = held_X[perm[:k]].mean(0); test_in = held_X[perm[k:]]
             s_pos_w, s_neg_w = centroid_scores(cen_in, test_in), centroid_scores(cen_in, neg)
             tpr_w = tpr_at_fpr(s_pos_w, s_neg_w)
-            auc_w = roc_auc_score([1]*len(s_pos_w) + [0]*len(s_neg_w), np.r_[s_pos_w, s_neg_w])
+            auc_w, auc_w_lo, auc_w_hi = centroid_auroc_ci(s_pos_w, s_neg_w)
             cross.append(tpr_c); within.append(tpr_w)
             rows.append(dict(model=model, held_out=SHORT[held], n=len(held_X),
-                             cross_mechanism_TPR=round(tpr_c, 3), cross_mechanism_AUROC=round(float(auc_c), 3),
-                             within_mechanism_TPR=round(tpr_w, 3), within_mechanism_AUROC=round(float(auc_w), 3)))
+                             cross_TPR_at2=round(tpr_c, 3),
+                             cross_TPR_at5=round(tpr_at_fpr(s_pos_c, s_neg_c, 0.05), 3),
+                             cross_TPR_at10=round(tpr_at_fpr(s_pos_c, s_neg_c, 0.10), 3),
+                             cross_AUROC=auc_c, cross_AUROC_lo=auc_c_lo, cross_AUROC_hi=auc_c_hi,
+                             within_TPR_at2=round(tpr_w, 3), within_AUROC=auc_w,
+                             within_AUROC_lo=auc_w_lo, within_AUROC_hi=auc_w_hi))
             # full matrix row: each train family -> this held family
             for f in fams:
                 fc = X[((full["category"] == f) & (full["label"] == 1)).to_numpy()].mean(0)
@@ -453,22 +478,23 @@ def labeling():
     for ax, model in zip(axs, REPOS):
         L = op_layer(model)
         tr, va, te = load_splits(model)
-        full = pd.concat([tr, va, te], ignore_index=True)
-        X = X_of(full, L); m = masks(full)
-        nb = m["nonben"]
-        origin = (full["category"].str.startswith("jailbreak")).to_numpy()  # literature: from-attack
-        behavior = m["jailbroken"]                                          # ours: actually complied
-        # AUROC of a probe under each labeling target, non-benign only (hard negatives)
-        Xnb = X[nb]
-        for name, y in [("origin-label", origin[nb].astype(int)), ("behavior-label", behavior[nb].astype(int))]:
-            if len(np.unique(y)) == 2:
-                p = LogisticRegression(max_iter=2000, class_weight="balanced").fit(Xnb, y)
-                a, lo, hi = auroc_ci(y, p.decision_function(Xnb))
+        Xtr, Xte = X_of(tr, L), X_of(te, L)
+        mtr, mte = masks(tr), masks(te)
+        nbtr, nbte = mtr["nonben"], mte["nonben"]
+        # Two labelings, trained on TRAIN / evaluated on TEST (non-benign only).
+        origin_tr = tr["category"].str.startswith("jailbreak").to_numpy()   # was it an attack?
+        origin_te = te["category"].str.startswith("jailbreak").to_numpy()
+        targets_ = [("origin-label", origin_tr[nbtr].astype(int), origin_te[nbte].astype(int)),
+                    ("behavior-label", mtr["jailbroken"][nbtr].astype(int), mte["jailbroken"][nbte].astype(int))]
+        for name, ytr, yte in targets_:
+            if len(np.unique(ytr)) == 2 and len(np.unique(yte)) == 2:
+                p = LogisticRegression(max_iter=2000, class_weight="balanced").fit(Xtr[nbtr], ytr)
+                a, lo, hi = auroc_ci(yte, p.decision_function(Xte[nbte]))
                 rows.append(dict(model=model, labeling=name, auroc=round(a, 3),
                                  lo=round(lo, 3), hi=round(hi, 3)))
-        # 2D PCA colored by behavior label among non-benign
-        Z = PCA(n_components=2, random_state=42).fit_transform(StandardScaler().fit_transform(Xnb))
-        beh = behavior[nb]
+        # 2D PCA colored by behavior label among TEST-split non-benign
+        Z = PCA(n_components=2, random_state=42).fit_transform(StandardScaler().fit_transform(Xte[nbte]))
+        beh = mte["jailbroken"][nbte]
         ax.scatter(Z[~beh, 0], Z[~beh, 1], s=10, alpha=0.5, color=CB["sky"], label="refused (label 0)")
         ax.scatter(Z[beh, 0], Z[beh, 1], s=10, alpha=0.5, color=CB["vermillion"], label="jailbroken (label 1)")
         ax.set_xlabel("PC-1"); ax.set_ylabel("PC-2")
@@ -527,8 +553,25 @@ def layersweep():
 
 # ───────────────────────── dispatch ─────────────────────────
 
+def verify():
+    """Provenance check: targets() T3 and labeling() behavior-label are the
+    identical computation and MUST be numerically equal on the same dataset."""
+    for model in REPOS:
+        L = op_layer(model)
+        tr, va, te = load_splits(model)
+        Xtr, Xte = X_of(tr, L), X_of(te, L)
+        mtr, mte = masks(tr), masks(te)
+        tn, en = mtr["nonben"], mte["nonben"]
+        p = LogisticRegression(max_iter=2000, class_weight="balanced").fit(
+            Xtr[tn], mtr["jailbroken"][tn].astype(int))
+        a = roc_auc_score(mte["jailbroken"][en].astype(int), p.decision_function(Xte[en]))
+        print(f"  {model} L{L}: T3 == behavior-label AUROC = {a:.3f}")
+    print("  -> this must equal Table 2 T3 and Table 5 behavior-label exactly.")
+
+
 ASSETS = {"table1": table1, "targets": targets, "families": families, "axes": axes,
-          "lofo": lofo, "fewshot": fewshot, "labeling": labeling, "layersweep": layersweep}
+          "lofo": lofo, "fewshot": fewshot, "labeling": labeling, "layersweep": layersweep,
+          "verify": verify}
 
 
 def main():

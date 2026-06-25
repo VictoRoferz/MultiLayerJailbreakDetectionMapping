@@ -50,7 +50,17 @@ SHORT = {"jailbreak_gcg_universal": "GCG-univ", "jailbreak_artprompt": "ArtPromp
          "jailbreak_gcg_individual": "GCG-indiv", "harmful_direct": "Direct"}
 JB_FAMILIES = ["jailbreak_gcg_universal", "jailbreak_artprompt", "jailbreak_gcg_individual"]
 MAIN_LAYER = {"gemma": 15, "vicuna": 10}   # peak T3-success layer per Table 2 (single-layer figs)
+OVERRIDE_LAYER = None                        # set via 2nd CLI arg to render detail figs at another layer
 MIN_N = 25
+
+
+def op_layer(model):
+    """Operating layer for single-layer figures (CLI override if valid for the model)."""
+    return OVERRIDE_LAYER if (OVERRIDE_LAYER in REPOS[model][1]) else MAIN_LAYER[model]
+
+
+def suf():
+    return f"_L{OVERRIDE_LAYER}" if OVERRIDE_LAYER is not None else ""
 N_BOOT = 1000
 
 # ───────────────────────── plotting style (publication) ─────────────────────────
@@ -254,7 +264,7 @@ def targets():
 
 def families():
     for model in REPOS:
-        L = MAIN_LAYER[model]
+        L = op_layer(model)
         tr, va, te = load_splits(model)
         full = pd.concat([tr, va, te], ignore_index=True)
         X = X_of(full, L)
@@ -291,7 +301,7 @@ def families():
         ax.grid(False)
         ax.set_title(f"{model.capitalize()} (layer {L}): attack families occupy distinct\n"
                      f"directions (diagonal = within-family ceiling)")
-        save_fig(fig, f"fig3_heatmap_{model}")
+        save_fig(fig, f"fig3_heatmap_{model}{suf()}")
         # MDS scatter (subsample for speed)
         cats = ["benign", "harmful_direct"] + [f for f in JB_FAMILIES]
         idx, lab = [], []
@@ -316,14 +326,14 @@ def families():
         ax.set_xlabel("MDS-1"); ax.set_ylabel("MDS-2")
         ax.set_title(f"{model.capitalize()} (layer {L}): activation geometry by category")
         ax.legend(loc="best", markerscale=1.6)
-        save_fig(fig, f"fig3_mds_{model}")
+        save_fig(fig, f"fig3_mds_{model}{suf()}")
 
 # ───────────────────────── Fig 4: harm vs refusal axis ─────────────────────────
 
 def axes():
     fig, axs = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
     for ax, model in zip(axs, REPOS):
-        L = MAIN_LAYER[model]
+        L = op_layer(model)
         tr, va, te = load_splits(model)
         full = pd.concat([tr, va, te], ignore_index=True)
         X = X_of(full, L); m = masks(full)
@@ -344,7 +354,7 @@ def axes():
         ax.set_title(f"{model.capitalize()} (layer {L})"); ax.legend()
     axs[0].set_ylabel("projection of family's jailbreak shift\n(onto unit axis)")
     fig.suptitle("Which internal axis does each attack family move along?")
-    save_fig(fig, "fig4_axes")
+    save_fig(fig, f"fig4_axes{suf()}")
 
 # ───────────────────────── Fig 5 + Table 3: LOFO ─────────────────────────
 
@@ -352,7 +362,7 @@ def lofo():
     rows = []
     fig, axs = plt.subplots(1, 2, figsize=(11, 4.5), sharey=True)
     for ax, model in zip(axs, REPOS):
-        L = MAIN_LAYER[model]
+        L = op_layer(model)
         tr, va, te = load_splits(model)
         full = pd.concat([tr, va, te], ignore_index=True)
         X = X_of(full, L); m = masks(full)
@@ -395,8 +405,8 @@ def lofo():
         ax.set_title(f"{model.capitalize()} (layer {L})"); ax.legend(loc="upper center")
     axs[0].set_ylabel("TPR @ FPR < 2%")
     fig.suptitle("Detection transfers within a mechanism, collapses across mechanisms")
-    save_fig(fig, "fig5_lofo")
-    save_table("table3_lofo", pd.DataFrame(rows))
+    save_fig(fig, f"fig5_lofo{suf()}")
+    save_table(f"table3_lofo{suf()}", pd.DataFrame(rows))
 
 # ───────────────────────── Fig 6: few-shot data efficiency ─────────────────────────
 
@@ -405,7 +415,7 @@ def fewshot():
     fig, axs = plt.subplots(1, 2, figsize=(11, 4.5), sharey=True)
     rows = []
     for ax, model in zip(axs, REPOS):
-        L = MAIN_LAYER[model]
+        L = op_layer(model)
         tr, va, te = load_splits(model)
         full = pd.concat([tr, va, te], ignore_index=True)
         X = X_of(full, L); m = masks(full)
@@ -432,8 +442,8 @@ def fewshot():
         ax.set_ylim(0, 1.05); ax.legend(loc="center right")
     axs[0].set_ylabel("held-out jailbreak TPR @ FPR < 2%")
     fig.suptitle("Data-efficient — but the ceiling collapses under honest (hard) negatives")
-    save_fig(fig, "fig6_fewshot")
-    save_table("table4_fewshot", pd.DataFrame(rows))
+    save_fig(fig, f"fig6_fewshot{suf()}")
+    save_table(f"table4_fewshot{suf()}", pd.DataFrame(rows))
 
 # ───────────────────────── Fig 7: labeling matters ─────────────────────────
 
@@ -441,7 +451,7 @@ def labeling():
     rows = []
     fig, axs = plt.subplots(1, 2, figsize=(11, 4.5))
     for ax, model in zip(axs, REPOS):
-        L = MAIN_LAYER[model]
+        L = op_layer(model)
         tr, va, te = load_splits(model)
         full = pd.concat([tr, va, te], ignore_index=True)
         X = X_of(full, L); m = masks(full)
@@ -465,8 +475,8 @@ def labeling():
         ax.set_title(f"{model.capitalize()} (layer {L}): non-benign, behavior-labeled")
         ax.legend(loc="best", markerscale=1.6)
     fig.suptitle("Behavior labels (did it comply?) ≠ prompt-origin labels (was it an attack?)")
-    save_fig(fig, "fig7_labeling")
-    save_table("table5_labeling", pd.DataFrame(rows))
+    save_fig(fig, f"fig7_labeling{suf()}")
+    save_table(f"table5_labeling{suf()}", pd.DataFrame(rows))
 
 # ───────────────────────── Fig 8 + Table 6: layer robustness ─────────────────────────
 
@@ -522,9 +532,13 @@ ASSETS = {"table1": table1, "targets": targets, "families": families, "axes": ax
 
 
 def main():
+    global OVERRIDE_LAYER
     os.makedirs(OUT, exist_ok=True)
     setup_style()
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if len(sys.argv) > 2:
+        OVERRIDE_LAYER = int(sys.argv[2])
+        print(f"[override] single-layer figures will use layer {OVERRIDE_LAYER}")
     todo = list(ASSETS) if which == "all" else [which]
     for name in todo:
         if name not in ASSETS:
